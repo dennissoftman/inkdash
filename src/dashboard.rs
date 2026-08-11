@@ -1,5 +1,7 @@
 mod widgets;
 
+use std::sync::Arc;
+
 use crate::battery::BatteryStatus;
 use crate::datetime::DateTime;
 use crate::ink_stacks::Framebuffer;
@@ -13,7 +15,7 @@ pub struct DashboardData {
     pub wifi_connected: bool,
     pub wifi_ssid: Option<String>,
     pub wifi_signal_dbm: Option<i8>,
-    pub weather: Option<Weather>,
+    pub weather: Option<Arc<Weather>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

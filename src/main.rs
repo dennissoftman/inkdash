@@ -246,6 +246,7 @@ fn main() -> Result<()> {
                             .map(|value| format!("{value} dBm"))
                             .unwrap_or_else(|| "unavailable".into()),
                         data.weather
+                            .as_deref()
                             .map(|value| format!("{:.1} C {}", value.temperature_c, value.condition()))
                             .unwrap_or_else(|| "unavailable".into()),
                         match data.battery.reading {
@@ -391,7 +392,7 @@ fn refresh_dashboard_data<'d, C, M>(
     i2c: &mut I2cBus<'_>,
     battery: &mut Battery<'d, C, M>,
     wifi: &WifiManager,
-    weather: Option<weather::Weather>,
+    weather: Option<std::sync::Arc<weather::Weather>>,
 ) where
     C: AdcChannel,
     M: Borrow<AdcDriver<'d, C::AdcUnit>>,
@@ -425,7 +426,7 @@ fn collect_dashboard_data<'d, C, M>(
     i2c: &mut I2cBus<'_>,
     battery: &mut Battery<'d, C, M>,
     wifi: &WifiManager,
-    weather: Option<weather::Weather>,
+    weather: Option<std::sync::Arc<weather::Weather>>,
     usb_powered: bool,
 ) -> DashboardData
 where

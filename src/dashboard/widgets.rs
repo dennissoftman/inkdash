@@ -113,7 +113,7 @@ impl Widget for HomeScreen<'_> {
             top_inset: 9,
             bottom_inset: 0,
         };
-        let weather = CurrentWeatherWidget(self.data.weather);
+        let weather = CurrentWeatherWidget(self.data.weather.as_deref());
         let columns = [
             StackItem::fixed(&indoor, 100),
             StackItem::fixed(&separator, 1),
@@ -215,9 +215,9 @@ impl Widget for IndoorWidget {
     }
 }
 
-struct CurrentWeatherWidget(Option<Weather>);
+struct CurrentWeatherWidget<'a>(Option<&'a Weather>);
 
-impl Widget for CurrentWeatherWidget {
+impl Widget for CurrentWeatherWidget<'_> {
     fn draw(&self, target: &mut Framebuffer, bounds: Rectangle) {
         draw_weather_widget(target, bounds, self.0);
     }
@@ -268,6 +268,10 @@ const fn small() -> MonoTextStyle<'static, BinaryColor> {
 
 const fn value_style() -> MonoTextStyle<'static, BinaryColor> {
     MonoTextStyle::new(&FONT_9X15_BOLD, BinaryColor::On)
+}
+
+const fn weather_value_style() -> MonoTextStyle<'static, BinaryColor> {
+    MonoTextStyle::new(&FONT_10X20, BinaryColor::On)
 }
 
 fn centered_top() -> embedded_graphics::text::TextStyle {
@@ -379,7 +383,7 @@ fn draw_wifi_badge(
     .ok();
 }
 
-fn draw_weather_widget(target: &mut Framebuffer, bounds: Rectangle, weather: Option<Weather>) {
+fn draw_weather_widget(target: &mut Framebuffer, bounds: Rectangle, weather: Option<&Weather>) {
     let center = center_x(bounds);
     Text::with_text_style(
         "WEATHER",
@@ -391,7 +395,7 @@ fn draw_weather_widget(target: &mut Framebuffer, bounds: Rectangle, weather: Opt
     .ok();
     draw_weather_icon(
         target,
-        weather.map(Weather::kind),
+        weather.map(|value| value.kind()),
         Point::new(center, bounds.top_left.y + 30),
         thin(),
         filled(),
@@ -409,16 +413,11 @@ fn draw_weather_widget(target: &mut Framebuffer, bounds: Rectangle, weather: Opt
     .draw(target)
     .ok();
 
-    let range = weather
-        .map(|value| {
-            format!(
-                "L{:.0} H{:.0} C",
-                value.today.minimum_temperature_c, value.today.maximum_temperature_c
-            )
-        })
-        .unwrap_or_else(|| "L-- H-- C".to_owned());
+    let average = weather
+        .map(|value| format!("AVG {:.1} C", value.today.mean_temperature_c))
+        .unwrap_or_else(|| "AVG --.- C".to_owned());
     Text::with_text_style(
-        &range,
+        &average,
         Point::new(center, bounds.top_left.y + 61),
         small(),
         centered_top(),
@@ -474,15 +473,12 @@ impl Widget for TodayContent<'_> {
     fn draw(&self, target: &mut Framebuffer, bounds: Rectangle) {
         let x = bounds.top_left.x;
         let y = bounds.top_left.y;
-        let title = self
-            .data
-            .time
-            .map(|value| format!("TODAY  {}", value.short_date()))
-            .unwrap_or_else(|| "TODAY".to_owned());
+        let weather = self.data.weather.as_deref();
+        let title = weather_location_title(weather);
         Text::with_text_style(
             &title,
-            Point::new(center_x(bounds), y + 5),
-            small(),
+            Point::new(center_x(bounds), y + 2),
+            value_style(),
             centered_top(),
         )
         .draw(target)
@@ -497,39 +493,42 @@ impl Widget for TodayContent<'_> {
 
         draw_weather_icon(
             target,
-            self.data.weather.map(Weather::kind),
+            weather.map(|value| value.kind()),
             Point::new(x + 47, y + 42),
             thin(),
             filled(),
         );
         Text::with_text_style(
-            self.data
-                .weather
-                .map(Weather::condition)
-                .unwrap_or("NO DATA"),
+            weather.map(|value| value.condition()).unwrap_or("NO DATA"),
             Point::new(x + 47, y + 59),
             small(),
             centered_top(),
         )
         .draw(target)
         .ok();
-        let temperature = self
-            .data
-            .weather
+        let rain = weather
+            .and_then(|value| value.today.precipitation_probability_percent)
+            .map(|value| format!("RAIN {value}%"))
+            .unwrap_or_else(|| "RAIN --%".to_owned());
+        Text::with_text_style(&rain, Point::new(x + 47, y + 70), small(), centered_top())
+            .draw(target)
+            .ok();
+        let temperature = weather
             .map(|value| format!("{:.1} C", value.temperature_c))
             .unwrap_or_else(|| "--.- C".to_owned());
+        Text::with_text_style("NOW", Point::new(x + 142, y + 21), small(), centered_top())
+            .draw(target)
+            .ok();
         Text::with_text_style(
             &temperature,
-            Point::new(x + 142, y + 31),
-            value_style(),
+            Point::new(x + 142, y + 33),
+            weather_value_style(),
             centered_top(),
         )
         .draw(target)
         .ok();
         draw_drop_icon(target, Point::new(x + 120, y + 62), filled());
-        let humidity = self
-            .data
-            .weather
+        let humidity = weather
             .map(|value| format!("{}%", value.relative_humidity_percent))
             .unwrap_or_else(|| "--%".to_owned());
         Text::with_text_style(
@@ -558,7 +557,11 @@ impl Widget for TodayContent<'_> {
             .ok();
         }
 
-        let day = self.data.weather.map(|value| value.today);
+        let day = weather.map(|value| value.today);
+        let average = MetricWidget {
+            label: "AVERAGE",
+            value: day.map(|value| format!("{:.1} C", value.mean_temperature_c)),
+        };
         let low = MetricWidget {
             label: "LOW",
             value: day.map(|value| format!("{:.0} C", value.minimum_temperature_c)),
@@ -567,16 +570,10 @@ impl Widget for TodayContent<'_> {
             label: "HIGH",
             value: day.map(|value| format!("{:.0} C", value.maximum_temperature_c)),
         };
-        let rain = MetricWidget {
-            label: "RAIN",
-            value: day
-                .and_then(|value| value.precipitation_probability_percent)
-                .map(|value| format!("{value}%")),
-        };
         let metrics = [
             StackItem::fill(&low, 1),
+            StackItem::fill(&average, 1),
             StackItem::fill(&high, 1),
-            StackItem::fill(&rain, 1),
         ];
         Stack::horizontal(&metrics).draw(
             target,
@@ -599,7 +596,7 @@ impl Widget for MetricWidget {
         Text::with_text_style(
             self.value.as_deref().unwrap_or("--"),
             position + Point::new(0, 18),
-            value_style(),
+            weather_value_style(),
             centered_top(),
         )
         .draw(target)
@@ -607,21 +604,21 @@ impl Widget for MetricWidget {
     }
 }
 
-struct ForecastScreen {
-    weather: Option<Weather>,
+struct ForecastScreen<'a> {
+    weather: Option<&'a Weather>,
 }
 
-impl ForecastScreen {
-    const fn new(data: &DashboardData) -> Self {
+impl<'a> ForecastScreen<'a> {
+    fn new(data: &'a DashboardData) -> Self {
         Self {
-            weather: data.weather,
+            weather: data.weather.as_deref(),
         }
     }
 }
 
-impl Widget for ForecastScreen {
+impl Widget for ForecastScreen<'_> {
     fn draw(&self, target: &mut Framebuffer, bounds: Rectangle) {
-        let header = SectionHeader("FORECAST");
+        let header = SectionHeader(weather_page_title("FORECAST", self.weather));
         let today = ForecastDayWidget {
             label: "TODAY",
             day: self.weather.map(|value| value.today),
@@ -651,12 +648,12 @@ impl Widget for ForecastScreen {
     }
 }
 
-struct SectionHeader(&'static str);
+struct SectionHeader(String);
 
 impl Widget for SectionHeader {
     fn draw(&self, target: &mut Framebuffer, bounds: Rectangle) {
         Text::with_text_style(
-            self.0,
+            &self.0,
             Point::new(center_x(bounds), bounds.top_left.y + 5),
             small(),
             centered_top(),
@@ -709,39 +706,61 @@ impl Widget for ForecastDayWidget {
         .draw(target)
         .ok();
 
-        let high = self
+        let average = self
             .day
-            .map(|value| format!("{:.0} C", value.maximum_temperature_c))
-            .unwrap_or_else(|| "-- C".to_owned());
+            .map(|value| format!("{:.1} C", value.mean_temperature_c))
+            .unwrap_or_else(|| "--.- C".to_owned());
         let low = self
             .day
-            .map(|value| format!("{:.0} C", value.minimum_temperature_c))
-            .unwrap_or_else(|| "-- C".to_owned());
+            .map(|value| format!("{:.0}", value.minimum_temperature_c))
+            .unwrap_or_else(|| "--".to_owned());
+        let high = self
+            .day
+            .map(|value| format!("{:.0}", value.maximum_temperature_c))
+            .unwrap_or_else(|| "--".to_owned());
         let rain = self
             .day
             .and_then(|value| value.precipitation_probability_percent)
             .map(|value| format!("{value}%"))
             .unwrap_or_else(|| "--%".to_owned());
-        for (label, value, label_y, value_y) in [("HIGH", &high, 63, 75), ("LOW", &low, 93, 105)] {
-            Text::with_text_style(
-                label,
-                Point::new(center, y + label_y),
-                small(),
-                centered_top(),
-            )
-            .draw(target)
-            .ok();
-            Text::with_text_style(
-                value,
-                Point::new(center, y + value_y),
-                value_style(),
-                centered_top(),
-            )
-            .draw(target)
-            .ok();
-        }
+        let wind = self
+            .day
+            .map(|value| format!("{:.0} KM/H", value.maximum_wind_speed_kmh))
+            .unwrap_or_else(|| "-- KM/H".to_owned());
+        Text::with_text_style(
+            "AVERAGE",
+            Point::new(center, y + 63),
+            small(),
+            centered_top(),
+        )
+        .draw(target)
+        .ok();
+        Text::with_text_style(
+            &average,
+            Point::new(center, y + 75),
+            value_style(),
+            centered_top(),
+        )
+        .draw(target)
+        .ok();
+        Text::with_text_style(
+            &format!("H {high}  L {low} C"),
+            Point::new(center, y + 96),
+            small(),
+            centered_top(),
+        )
+        .draw(target)
+        .ok();
         Text::with_text_style(
             &format!("RAIN {rain}"),
+            Point::new(center, y + 110),
+            small(),
+            centered_top(),
+        )
+        .draw(target)
+        .ok();
+        Text::with_text_style(
+            &format!("WIND {wind}"),
             Point::new(center, y + 124),
             small(),
             centered_top(),
@@ -1101,6 +1120,69 @@ fn compact_ssid(ssid: Option<&str>) -> String {
         label.push_str("...");
     }
     label
+}
+
+fn weather_page_title(prefix: &str, weather: Option<&Weather>) -> String {
+    const MAX_CHARS: usize = 32;
+
+    let Some(weather) = weather else {
+        return prefix.to_owned();
+    };
+    let location_width = MAX_CHARS.saturating_sub(prefix.chars().count() + 1);
+    format!(
+        "{prefix} {}",
+        compact_location(
+            weather.location.city(),
+            weather.location.country_code(),
+            location_width
+        )
+    )
+}
+
+fn weather_location_title(weather: Option<&Weather>) -> String {
+    // FONT_9X15_BOLD is nine pixels wide; 21 characters leave a small margin.
+    const MAX_CHARS: usize = 21;
+
+    weather
+        .map(|weather| {
+            compact_location(
+                weather.location.city(),
+                weather.location.country_code(),
+                MAX_CHARS,
+            )
+        })
+        .unwrap_or_else(|| "LOCATION".to_owned())
+}
+
+fn compact_location(city: &str, country: &str, max_chars: usize) -> String {
+    const SEPARATOR_WIDTH: usize = 2;
+
+    let city_length = city.chars().count();
+    let country_length = country.chars().count();
+    if city_length + SEPARATOR_WIDTH + country_length <= max_chars {
+        return format!("{city}, {country}");
+    }
+
+    let available = max_chars.saturating_sub(SEPARATOR_WIDTH);
+    let country_width = country_length.min(available);
+    let city_width = available.saturating_sub(country_width);
+    format!(
+        "{}, {}",
+        compact_component(city, city_width),
+        compact_component(country, country_width)
+    )
+}
+
+fn compact_component(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_owned();
+    }
+    if max_chars <= 3 {
+        return value.chars().take(max_chars).collect();
+    }
+    let mut compact: String = value.chars().take(max_chars - 3).collect();
+    compact.push_str("...");
+    compact
 }
 
 fn draw_battery(

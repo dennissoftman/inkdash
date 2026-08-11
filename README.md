@@ -9,9 +9,9 @@ The dashboard currently shows:
   framed by a morning/day/evening/night scene selected from the current hour;
 - indoor temperature and relative humidity with thermometer and water-drop
   icons in the lower-left widget;
-- current outdoor conditions plus today's low, high, humidity, and rain chance
-  from Open-Meteo in the lower-right widget, using sun, cloud, fog, rain, and
-  snow condition icons;
+- current outdoor temperature and conditions plus today's mean, humidity, and
+  rain chance from Open-Meteo in the lower-right widget, using sun, cloud, fog,
+  rain, and snow condition icons;
 - Wi-Fi signal strength and the configured network name at the top left;
 - a five-level battery icon at the top right, with a lightning bolt on its left
   while attached to a USB host.
@@ -25,8 +25,10 @@ The dashboard has three pages. Press **BOOT** to move forward and **PWR** to mov
 backward:
 
 1. Home: clock, date, indoor readings, and current weather.
-2. Today: current conditions plus humidity, low, high, and rain probability.
-3. Forecast: side-by-side today and tomorrow conditions, lows, highs, and rain.
+2. Today: city/country code, current conditions, humidity, daily mean, low,
+   high, and rain probability.
+3. Forecast: city/country code and side-by-side today/tomorrow conditions,
+   including daily means, lows, highs, rain, and maximum wind speed.
 
 The display code uses a small in-project layout layer called **ink-stacks**.
 Every widget draws relative to the rectangle assigned by a horizontal or
@@ -75,8 +77,10 @@ failures begin with `ERR`. The RTC stores local wall-clock time and has no
 timezone field. Wi-Fi credentials persist in the default ESP-IDF NVS partition.
 They are not printed back by any command.
 
-After Wi-Fi connects, the firmware determines its approximate coordinates once
-using `ipwho.is` and saves them in NVS. Later boots reuse those coordinates.
+After Wi-Fi connects, the firmware determines its approximate coordinates,
+city, and country code once using `ipwho.is` and saves them in NVS. Later boots
+reuse the complete location. Firmware upgrading from the old coordinate-only
+cache refreshes the location once to add the display name.
 Open-Meteo weather is fetched on a dedicated worker thread every 20 minutes, so
 HTTPS requests never block input or dashboard rendering. A failed update is
 retried after five minutes and leaves the last successful weather reading on

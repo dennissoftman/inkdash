@@ -9,6 +9,7 @@ use crate::commands::Command;
 use crate::events::{AppEvent, EventSender};
 
 const DEBOUNCE_MS: u32 = 30;
+const BUTTON_TASK_STACK_SIZE: usize = 4096;
 
 pub fn start(
     boot_pin: Gpio0<'static>,
@@ -20,12 +21,12 @@ pub fn start(
     let power_sender = sender.clone();
     thread::Builder::new()
         .name("button-boot".into())
-        .stack_size(2048)
+        .stack_size(BUTTON_TASK_STACK_SIZE)
         .spawn(move || button_loop(boot, Command::NextScreen, sender))
         .context("starting BOOT interrupt task")?;
     thread::Builder::new()
         .name("button-power".into())
-        .stack_size(2048)
+        .stack_size(BUTTON_TASK_STACK_SIZE)
         .spawn(move || button_loop(power, Command::PreviousScreen, power_sender))
         .context("starting PWR interrupt task")?;
     Ok(())

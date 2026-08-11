@@ -9,13 +9,19 @@ use serde::Deserialize;
 
 const LATITUDE_KEY: &str = "loc_lat_e6";
 const LONGITUDE_KEY: &str = "loc_lon_e6";
-const IP_LOCATION_URL: &str = "https://ipwho.is/?fields=success,latitude,longitude,message";
+const CITY_KEY: &str = "loc_city";
+const COUNTRY_CODE_KEY: &str = "loc_cc";
+const IP_LOCATION_URL: &str =
+    "https://ipwho.is/?fields=success,latitude,longitude,city,country_code,message";
 const HTTP_RESPONSE_LIMIT: usize = 4096;
+const LOCATION_NAME_LIMIT: usize = 96;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Location {
     pub latitude: f32,
     pub longitude: f32,
+    pub city: String,
+    pub country_code: String,
 }
 
 /// A deliberately small seam for adding a BSSID or another location provider.
@@ -30,6 +36,8 @@ struct IpLocationResponse {
     success: bool,
     latitude: Option<f64>,
     longitude: Option<f64>,
+    city: Option<String>,
+    country_code: Option<String>,
     message: Option<String>,
 }
 
@@ -50,8 +58,18 @@ impl LocationProvider for IpLocationProvider {
                 .longitude
                 .context("IP geolocation response omitted longitude")?
                 as f32,
+            city: response
+                .city
+                .context("IP geolocation response omitted city")?
+                .trim()
+                .to_owned(),
+            country_code: response
+                .country_code
+                .context("IP geolocation response omitted country code")?
+                .trim()
+                .to_ascii_uppercase(),
         };
-        validate(location)?;
+        validate(&location)?;
         Ok(location)
     }
 }
@@ -71,44 +89,50 @@ impl LocationStore {
     {
         if let Some(location) = self.load()? {
             log::info!(
-                "Using saved location {:.4}, {:.4}",
-                location.latitude,
-                location.longitude
+                "Using saved location {}, {}",
+                location.city,
+                location.country_code
             );
             return Ok(location);
         }
 
         let location = provider.locate().context("detecting location")?;
-        self.save(location)?;
+        self.save(&location)?;
         log::info!(
-            "Detected and saved location {:.4}, {:.4}",
-            location.latitude,
-            location.longitude
+            "Detected and saved location {}, {}",
+            location.city,
+            location.country_code
         );
         Ok(location)
     }
 
     fn load(&self) -> Result<Option<Location>> {
-        let (Some(latitude), Some(longitude)) = (
+        let (Some(latitude), Some(longitude), Some(city), Some(country_code)) = (
             self.storage.get_i32(LATITUDE_KEY)?,
             self.storage.get_i32(LONGITUDE_KEY)?,
+            self.load_name(CITY_KEY)?,
+            self.load_name(COUNTRY_CODE_KEY)?,
         ) else {
             return Ok(None);
         };
         let location = Location {
             latitude: latitude as f32 / 1_000_000.0,
             longitude: longitude as f32 / 1_000_000.0,
+            city,
+            country_code,
         };
-        if let Err(error) = validate(location) {
+        if let Err(error) = validate(&location) {
             log::warn!("Discarding invalid saved location: {error:#}");
             self.storage.remove(LATITUDE_KEY)?;
             self.storage.remove(LONGITUDE_KEY)?;
+            self.storage.remove(CITY_KEY)?;
+            self.storage.remove(COUNTRY_CODE_KEY)?;
             return Ok(None);
         }
         Ok(Some(location))
     }
 
-    fn save(&self, location: Location) -> Result<()> {
+    fn save(&self, location: &Location) -> Result<()> {
         validate(location)?;
         self.storage
             .set_i32(
@@ -122,17 +146,47 @@ impl LocationStore {
                 (location.longitude * 1_000_000.0).round() as i32,
             )
             .context("saving location longitude")?;
+        self.storage
+            .set_str(CITY_KEY, &location.city)
+            .context("saving location city")?;
+        self.storage
+            .set_str(COUNTRY_CODE_KEY, &location.country_code)
+            .context("saving location country code")?;
         Ok(())
+    }
+
+    fn load_name(&self, key: &str) -> Result<Option<String>> {
+        let Some(length) = self.storage.str_len(key)? else {
+            return Ok(None);
+        };
+        if length <= 1 || length > LOCATION_NAME_LIMIT + 1 {
+            log::warn!("Discarding invalid saved location name in {key}");
+            self.storage.remove(key)?;
+            return Ok(None);
+        }
+        let mut buffer = vec![0_u8; length];
+        Ok(self.storage.get_str(key, &mut buffer)?.map(str::to_owned))
     }
 }
 
-fn validate(location: Location) -> Result<()> {
+fn validate(location: &Location) -> Result<()> {
     if !location.latitude.is_finite()
         || !location.longitude.is_finite()
         || !(-90.0..=90.0).contains(&location.latitude)
         || !(-180.0..=180.0).contains(&location.longitude)
     {
         return Err(anyhow!("location coordinates are out of range"));
+    }
+    if location.city.trim().is_empty()
+        || location.city.len() > LOCATION_NAME_LIMIT
+        || location.city.contains('\0')
+        || !(2..=3).contains(&location.country_code.len())
+        || !location
+            .country_code
+            .bytes()
+            .all(|byte| byte.is_ascii_alphabetic())
+    {
+        return Err(anyhow!("location city or country code is invalid"));
     }
     Ok(())
 }
