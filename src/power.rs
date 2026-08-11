@@ -1,6 +1,15 @@
 use anyhow::{Context, Result};
 use esp_idf_svc::sys::{self, EspError};
 
+/// Returns whether the ESP32-S3 native USB peripheral is attached to a host.
+///
+/// The board does not route the charger's status output or USB VBUS to a GPIO,
+/// so the USB SOF monitor is the only unambiguous external-power signal exposed
+/// to firmware without adding hardware.
+pub fn usb_host_connected() -> bool {
+    unsafe { sys::usb_serial_jtag_is_connected() }
+}
+
 const MAX_CPU_FREQUENCY_MHZ: i32 = 160;
 const IDLE_CPU_FREQUENCY_MHZ: i32 = 40;
 

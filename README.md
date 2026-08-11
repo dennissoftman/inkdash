@@ -5,14 +5,31 @@ Modular Rust + ESP-IDF firmware for the Waveshare **ESP32-S3-ePaper-1.54**
 
 The dashboard currently shows:
 
-- a centered `HH:MM` clock from the onboard PCF85063 RTC;
-- temperature in degrees Celsius and relative humidity from the onboard SHTC3;
-- Wi-Fi link state and the configured network name at the top left;
-- estimated battery percentage at the top right when a plausible battery voltage is detected.
+- a centered `HH:MM` clock and `Mon 10 Jun` date from the onboard PCF85063 RTC,
+  framed by a morning/day/evening/night scene selected from the current hour;
+- indoor temperature and relative humidity with thermometer and water-drop
+  icons in the lower-left widget;
+- current outdoor conditions plus today's low, high, humidity, and rain chance
+  from Open-Meteo in the lower-right widget, using sun, cloud, fog, rain, and
+  snow condition icons;
+- Wi-Fi signal strength and the configured network name at the top left;
+- a five-level battery icon at the top right, with a lightning bolt on its left
+  while attached to a USB host.
 
 The first render and every 30th subsequent update use a full e-paper refresh.
 Other minute changes use the board's partial-refresh waveform to reduce flashing
 and ghosting.
+
+The dashboard has three pages. Press **BOOT** to move forward and **PWR** to move
+backward:
+
+1. Home: clock, date, indoor readings, and current weather.
+2. Today: current conditions plus humidity, low, high, and rain probability.
+3. Forecast: side-by-side today and tomorrow conditions, lows, highs, and rain.
+
+Both buttons are active-low and software-debounced. Holding BOOT while resetting
+still invokes the ESP32-S3 ROM download behavior, so normal navigation uses short
+presses after startup.
 
 ## USB command console
 
@@ -44,11 +61,18 @@ failures begin with `ERR`. The RTC stores local wall-clock time and has no
 timezone field. Wi-Fi credentials persist in the default ESP-IDF NVS partition.
 They are not printed back by any command.
 
+After Wi-Fi connects, the firmware determines its approximate coordinates once
+using `ipwho.is` and saves them in NVS. Later boots reuse those coordinates.
+Open-Meteo weather is fetched on a dedicated worker thread every 20 minutes, so
+HTTPS requests never block input or dashboard rendering. A failed update is
+retried after five minutes and leaves the last successful weather reading on
+screen.
+
 To set the RTC from the development computer, open the monitor and paste a
 `TIME SET` command using the computer's current local time:
 
 ```sh
-source /Users/kane/export-esp.sh
+source "$HOME/.local/bin/export-esp.sh"
 espflash monitor --port /dev/cu.usbmodem101
 ```
 
@@ -114,6 +138,7 @@ console and automatically returning to ordinary commands after playback.
 | --- | --- |
 | `src/main.rs` | board wiring, event loop, refresh scheduling |
 | `src/board.rs` | board peripheral power-rail control |
+| `src/buttons.rs` | debounced BOOT/PWR page navigation |
 | `src/commands.rs` | USB command parsing and input thread |
 | `src/datetime.rs` | validated date/time representation and parsing |
 | `src/rtc.rs` | PCF85063 BCD register protocol |
@@ -121,27 +146,38 @@ console and automatically returning to ordinary commands after playback.
 | `src/battery.rs` | calibrated ADC sampling and approximate LiPo percentage |
 | `src/audio.rs` | ES8311 setup and temporary I2S tone playback |
 | `src/wifi.rs` | station-mode connection and NVS credential storage |
+| `src/location.rs` | cached coordinates and pluggable IP geolocation provider |
+| `src/weather.rs` | background Open-Meteo fetch and refresh scheduling |
 | `src/dashboard.rs` | display layout, text, badges, and framebuffer |
 | `src/epaper.rs` | SPI panel driver and full/partial waveforms |
 | `src/i2c_bus.rs` | ESP-IDF 5 current master-bus API used by onboard sensors |
 | `src/power.rs` | CPU dynamic-frequency and always-responsive USB policy |
+| `espflash.toml` | 8 MB flash size and custom partition-table selection |
+| `partitions.csv` | NVS, PHY, and enlarged single-app flash layout |
 
 ## Power behavior
 
-The firmware blocks on USB command input between minute boundaries instead of
-polling ten times per second. The RTC is read at the next minute boundary, the
-SHTC3 returns to sleep after every measurement, and I2S plus the speaker
-amplifier are enabled only during playback. CPU dynamic-frequency scaling uses
-40 MHz while idle and up to 160 MHz when ESP-IDF peripheral locks require it.
+The main loop blocks on its combined USB/button input channel between minute
+boundaries. A small input task samples the two switches every 10 ms for
+debouncing. The RTC is read at the next minute boundary, the SHTC3 returns to
+sleep after every measurement, and I2S plus the speaker amplifier are enabled
+only during playback. CPU dynamic-frequency scaling uses 40 MHz while idle and
+up to 160 MHz when ESP-IDF peripheral locks require it.
 Connected Wi-Fi uses maximum modem power saving while preserving the station
 connection. If a saved network is unavailable, a non-blocking reconnect is
-requested every five minutes; link state is checked alongside the RTC minute
-poll and refreshes the badge only when it changes. Automatic light sleep is intentionally disabled because it would
+requested every five minutes; link state and RSSI are checked alongside the RTC
+minute poll, and the badge refreshes only when its connection or bar tier
+changes. Automatic light sleep is intentionally disabled because it would
 make the native USB Serial/JTAG command interface intermittently unavailable.
 
 The SHTC3 temperature applies Waveshare's documented `-4 C` board/enclosure
 compensation. Battery percentage is an estimate from voltage because this board
 does not expose a fuel-gauge IC.
+
+The icon quantizes the voltage estimate into approximately 10%, 25%, 50%, 75%,
+and nearly-full fill levels instead of displaying an exact number. Its lightning
+bolt reports an active native USB host connection; the schematic does not expose
+the charger's status output or USB VBUS to an ESP32 GPIO.
 
 ## Board connections
 
@@ -158,6 +194,8 @@ does not expose a fuel-gauge IC.
 | Temperature/humidity SHTC3 | I2C `0x70` |
 | Shared I2C SDA / SCL | GPIO 47 / GPIO 48 |
 | Battery ADC | GPIO 4, ADC1 channel 3, 2:1 divider |
+| BOOT / next-page button (active low) | GPIO 0 |
+| PWR / previous-page button (active low) | GPIO 18 |
 | Audio/codec rail (active low; required for shared I2C) | GPIO 42 |
 | Audio I2S MCLK / BCLK / LRCK / data out | GPIO 14 / 15 / 38 / 45 |
 | Speaker amplifier enable | GPIO 46 |
@@ -168,7 +206,7 @@ The project uses ESP-IDF 5.5.3. Waveshare requires ESP-IDF 5.5 or newer for
 this board.
 
 ```sh
-source /Users/kane/export-esp.sh
+source "$HOME/.local/bin/export-esp.sh"
 cargo fmt --all --check
 cargo clippy -- -D warnings
 cargo build

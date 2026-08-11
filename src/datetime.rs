@@ -69,6 +69,19 @@ impl DateTime {
             + self.day as u16)
             % 7) as u8
     }
+
+    pub fn short_date(&self) -> String {
+        const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        const MONTHS: [&str; 12] = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ];
+        format!(
+            "{} {} {}",
+            WEEKDAYS[self.weekday() as usize],
+            self.day,
+            MONTHS[self.month as usize - 1]
+        )
+    }
 }
 
 impl fmt::Display for DateTime {

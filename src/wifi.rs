@@ -22,6 +22,7 @@ pub struct WifiStatus {
     pub configured_ssid: Option<String>,
     pub connected: bool,
     pub ip: Option<String>,
+    pub signal_dbm: Option<i8>,
 }
 
 #[derive(Clone, Debug)]
@@ -36,6 +37,7 @@ pub struct WifiManager {
     wifi: BlockingWifi<EspWifi<'static>>,
     storage: EspDefaultNvs,
     last_connected: bool,
+    last_signal_bars: u8,
     next_reconnect: Instant,
 }
 
@@ -55,6 +57,7 @@ impl WifiManager {
             wifi,
             storage,
             last_connected: false,
+            last_signal_bars: 0,
             next_reconnect: Instant::now(),
         })
     }
@@ -87,6 +90,7 @@ impl WifiManager {
         self.storage.remove(SSID_KEY)?;
         self.storage.remove(PASSWORD_KEY)?;
         self.last_connected = false;
+        self.last_signal_bars = 0;
         self.next_reconnect = Instant::now() + RECONNECT_INTERVAL;
         Ok(())
     }
@@ -96,11 +100,14 @@ impl WifiManager {
     /// the dashboard already wakes at RTC minute boundaries.
     pub fn poll(&mut self) -> Result<bool> {
         let connected = self.wifi.is_connected().unwrap_or(false);
-        let changed = connected != self.last_connected;
+        let signal_dbm = self.signal_dbm(connected);
+        let signal_bars = wifi_signal_bars(connected, signal_dbm);
+        let changed = connected != self.last_connected || signal_bars != self.last_signal_bars;
         let now = Instant::now();
 
         if connected {
             self.last_connected = true;
+            self.last_signal_bars = signal_bars;
             self.next_reconnect = now + RECONNECT_INTERVAL;
             return Ok(changed);
         }
@@ -109,6 +116,7 @@ impl WifiManager {
             self.next_reconnect = now;
         }
         self.last_connected = false;
+        self.last_signal_bars = 0;
 
         if now >= self.next_reconnect && self.load()?.is_some() {
             self.next_reconnect = now + RECONNECT_INTERVAL;
@@ -124,6 +132,7 @@ impl WifiManager {
     pub fn status(&self) -> Result<WifiStatus> {
         let configured_ssid = self.load()?.map(|credentials| credentials.ssid);
         let connected = self.wifi.is_connected().unwrap_or(false);
+        let signal_dbm = self.signal_dbm(connected);
         let ip = if connected {
             Some(self.wifi.wifi().sta_netif().get_ip_info()?.ip.to_string())
         } else {
@@ -133,7 +142,12 @@ impl WifiManager {
             configured_ssid,
             connected,
             ip,
+            signal_dbm,
         })
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.wifi.is_connected().unwrap_or(false)
     }
 
     pub fn scan(&mut self) -> Result<Vec<WifiNetwork>> {
@@ -207,8 +221,22 @@ impl WifiManager {
                     .context("waiting for a Wi-Fi address")
             });
         self.last_connected = self.wifi.is_connected().unwrap_or(false);
+        self.last_signal_bars =
+            wifi_signal_bars(self.last_connected, self.signal_dbm(self.last_connected));
         self.next_reconnect = Instant::now() + RECONNECT_INTERVAL;
         result
+    }
+
+    fn signal_dbm(&self, connected: bool) -> Option<i8> {
+        if connected {
+            self.wifi
+                .wifi()
+                .get_ap_info()
+                .ok()
+                .map(|access_point| access_point.signal_strength)
+        } else {
+            None
+        }
     }
 
     fn load(&self) -> Result<Option<WifiCredentials>> {
@@ -232,5 +260,17 @@ impl WifiManager {
             String::new()
         };
         Ok(Some(WifiCredentials { ssid, password }))
+    }
+}
+
+/// Convert station RSSI into the three tiers used by the compact status icon.
+pub fn wifi_signal_bars(connected: bool, signal_dbm: Option<i8>) -> u8 {
+    if !connected {
+        return 0;
+    }
+    match signal_dbm {
+        Some(rssi) if rssi >= -60 => 3,
+        Some(rssi) if rssi >= -75 => 2,
+        _ => 1,
     }
 }

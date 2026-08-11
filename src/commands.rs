@@ -1,5 +1,5 @@
 use std::io::{self, ErrorKind, Read};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -12,6 +12,8 @@ use crate::datetime::DateTime;
 
 #[derive(Debug)]
 pub enum Command {
+    NextScreen,
+    PreviousScreen,
     Ping,
     Help,
     TimeGet,
@@ -42,8 +44,12 @@ pub enum Command {
     AudioPcmEnd,
 }
 
-pub fn start_usb_console() -> Result<Receiver<Result<Command, String>>> {
+pub type CommandMessage = Result<Command, String>;
+pub type CommandSender = SyncSender<CommandMessage>;
+
+pub fn start_usb_console() -> Result<(CommandSender, Receiver<CommandMessage>)> {
     let (sender, receiver) = mpsc::sync_channel(8);
+    let console_sender = sender.clone();
     thread::Builder::new()
         .name("usb-console".into())
         .stack_size(4096)
@@ -65,7 +71,7 @@ pub fn start_usb_console() -> Result<Receiver<Result<Command, String>>> {
                             match byte {
                                 b'\r' | b'\n' => {
                                     if overflowed {
-                                        if sender
+                                        if console_sender
                                             .send(Err("command exceeds 256 bytes".into()))
                                             .is_err()
                                         {
@@ -77,7 +83,7 @@ pub fn start_usb_console() -> Result<Receiver<Result<Command, String>>> {
                                             .and_then(|text| {
                                                 parse(text).map_err(|error| format!("{error:#}"))
                                             });
-                                        if sender.send(parsed).is_err() {
+                                        if console_sender.send(parsed).is_err() {
                                             break 'read;
                                         }
                                     }
@@ -101,14 +107,14 @@ pub fn start_usb_console() -> Result<Receiver<Result<Command, String>>> {
                         thread::sleep(std::time::Duration::from_millis(20));
                     }
                     Err(error) => {
-                        let _ = sender.send(Err(format!("USB input error: {error}")));
+                        let _ = console_sender.send(Err(format!("USB input error: {error}")));
                         thread::sleep(std::time::Duration::from_millis(250));
                     }
                 }
             }
         })
         .context("starting USB command thread")?;
-    Ok(receiver)
+    Ok((sender, receiver))
 }
 
 pub fn help_text() -> &'static str {

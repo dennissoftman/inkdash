@@ -1,14 +1,17 @@
 mod audio;
 mod battery;
 mod board;
+mod buttons;
 mod commands;
 mod dashboard;
 mod datetime;
 mod epaper;
 mod i2c_bus;
+mod location;
 mod power;
 mod rtc;
 mod shtc3;
+mod weather;
 mod wifi;
 
 use std::borrow::Borrow;
@@ -18,10 +21,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
 use audio::Audio;
-use battery::Battery;
+use battery::{Battery, BatteryStatus};
 use board::BoardPower;
 use commands::Command;
-use dashboard::{DashboardData, Framebuffer};
+use dashboard::{DashboardData, DashboardScreen, Framebuffer};
 use epaper::{Epaper, FRAMEBUFFER_SIZE};
 use esp_idf_hal::adc::oneshot::config::{AdcChannelConfig, Calibration};
 use esp_idf_hal::adc::oneshot::{AdcChannelDriver, AdcDriver};
@@ -37,6 +40,7 @@ use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use i2c_bus::I2cBus;
 use rtc::Rtc;
 use shtc3::Shtc3;
+use weather::WeatherService;
 use wifi::{WifiCredentials, WifiManager};
 
 const FULL_REFRESH_AFTER_PARTIALS: u8 = 30;
@@ -119,6 +123,7 @@ fn main() -> Result<()> {
 
     let system_loop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
+    let mut weather = WeatherService::start(nvs.clone())?;
     let mut wifi = WifiManager::new(peripherals.modem, system_loop, nvs)?;
     match wifi.connect_saved() {
         Ok(true) => log::info!("Connected using saved Wi-Fi credentials"),
@@ -126,7 +131,8 @@ fn main() -> Result<()> {
         Err(error) => log::warn!("Saved Wi-Fi connection failed: {error:#}"),
     }
 
-    let commands = commands::start_usb_console()?;
+    let (command_sender, commands) = commands::start_usb_console()?;
+    buttons::start(pins.gpio0, pins.gpio18, command_sender)?;
     println!("READY Rust e-paper dashboard");
     println!("{}", commands::help_text());
 
@@ -134,11 +140,20 @@ fn main() -> Result<()> {
     let mut panel_initialized = false;
     let mut partial_refreshes = 0_u8;
     let mut force_refresh = true;
+    let mut force_full_refresh = false;
     let mut last_minute = None;
     let mut next_clock_poll = Instant::now();
     let mut next_wifi_poll = Instant::now();
+    let mut usb_powered = power::usb_host_connected();
+    let mut screen = DashboardScreen::Home;
 
     loop {
+        let current_usb_powered = power::usb_host_connected();
+        if current_usb_powered != usb_powered {
+            usb_powered = current_usb_powered;
+            force_refresh = true;
+        }
+
         if Instant::now() >= next_clock_poll {
             match rtc.read(&mut i2c) {
                 Ok(now) => {
@@ -169,13 +184,25 @@ fn main() -> Result<()> {
             next_wifi_poll = next_clock_poll;
         }
 
+        force_refresh |= weather.poll(wifi.is_connected());
+
         // E-paper refreshes take seconds. Keep consuming the bounded USB/PCM
         // queue until the stream ends so the host never stalls behind a redraw.
         if force_refresh && !audio.is_pcm_active() {
-            let data = collect_dashboard_data(&rtc, &climate_sensor, &mut i2c, &mut battery, &wifi);
-            dashboard::render(&mut framebuffer, &data);
+            let data = collect_dashboard_data(
+                &rtc,
+                &climate_sensor,
+                &mut i2c,
+                &mut battery,
+                &wifi,
+                weather.latest(),
+                usb_powered,
+            );
+            dashboard::render(&mut framebuffer, &data, screen);
 
-            let needs_full = !panel_initialized || partial_refreshes >= FULL_REFRESH_AFTER_PARTIALS;
+            let needs_full = force_full_refresh
+                || !panel_initialized
+                || partial_refreshes >= FULL_REFRESH_AFTER_PARTIALS;
             let refresh_result = if needs_full {
                 epaper
                     .init_full()
@@ -189,8 +216,9 @@ fn main() -> Result<()> {
                 Ok(()) => {
                     panel_initialized = true;
                     partial_refreshes = if needs_full { 0 } else { partial_refreshes + 1 };
+                    force_full_refresh = false;
                     log::info!(
-                        "Dashboard refreshed: time={}, temp={}, humidity={}, wifi={}, battery={}",
+                        "Dashboard refreshed: time={}, temp={}, humidity={}, wifi={}, rssi={}, weather={}, battery={}",
                         data.time
                             .map(|value| value.to_string())
                             .unwrap_or_else(|| "unset".into()),
@@ -201,9 +229,22 @@ fn main() -> Result<()> {
                             .map(|value| format!("{:.0}%", value.humidity_percent))
                             .unwrap_or_else(|| "unavailable".into()),
                         if data.wifi_connected { "up" } else { "down" },
-                        data.battery
-                            .map(|value| format!("{}% ({:.2} V)", value.percent, value.voltage_v))
-                            .unwrap_or_else(|| "not detected".into()),
+                        data.wifi_signal_dbm
+                            .map(|value| format!("{value} dBm"))
+                            .unwrap_or_else(|| "unavailable".into()),
+                        data.weather
+                            .map(|value| format!("{:.1} C {}", value.temperature_c, value.condition()))
+                            .unwrap_or_else(|| "unavailable".into()),
+                        match data.battery.reading {
+                            Some(value) => format!(
+                                "{}% ({:.2} V, {})",
+                                value.percent,
+                                value.voltage_v,
+                                if data.battery.usb_powered { "USB" } else { "battery" }
+                            ),
+                            None if data.battery.usb_powered => "not detected (USB)".into(),
+                            None => "not detected".into(),
+                        },
                     );
                 }
                 Err(error) => log::error!("Dashboard refresh failed: {error:#}"),
@@ -219,7 +260,22 @@ fn main() -> Result<()> {
         match commands.recv_timeout(wait) {
             Ok(Ok(command)) => {
                 let clock_changed = matches!(&command, Command::TimeSet(_));
-                force_refresh |= handle_command(command, &rtc, &mut i2c, &mut wifi, &mut audio);
+                match command {
+                    Command::NextScreen => {
+                        screen = screen.next();
+                        force_refresh = true;
+                        force_full_refresh = true;
+                    }
+                    Command::PreviousScreen => {
+                        screen = screen.previous();
+                        force_refresh = true;
+                        force_full_refresh = true;
+                    }
+                    command => {
+                        force_refresh |=
+                            handle_command(command, &rtc, &mut i2c, &mut wifi, &mut audio);
+                    }
+                }
                 if clock_changed {
                     next_clock_poll = Instant::now();
                 }
@@ -237,6 +293,8 @@ fn collect_dashboard_data<'d, C, M>(
     i2c: &mut I2cBus<'_>,
     battery: &mut Battery<'d, C, M>,
     wifi: &WifiManager,
+    weather: Option<weather::Weather>,
+    usb_powered: bool,
 ) -> DashboardData
 where
     C: AdcChannel,
@@ -251,23 +309,29 @@ where
         .inspect_err(|error| log::warn!("Climate read failed: {error:#}"))
         .ok();
     let battery = battery
-        .read()
+        .read(usb_powered)
         .inspect_err(|error| log::warn!("Battery read failed: {error:#}"))
-        .ok()
-        .flatten();
+        .unwrap_or_else(|_| BatteryStatus::unavailable(usb_powered));
     let wifi_status = wifi
         .status()
         .inspect_err(|error| log::warn!("Wi-Fi status failed: {error:#}"))
         .ok();
+    let wifi_connected = wifi_status
+        .as_ref()
+        .map(|status| status.connected)
+        .unwrap_or(false);
+    let wifi_ssid = wifi_status
+        .as_ref()
+        .and_then(|status| status.configured_ssid.clone());
+    let wifi_signal_dbm = wifi_status.as_ref().and_then(|status| status.signal_dbm);
     DashboardData {
         time,
         climate,
         battery,
-        wifi_connected: wifi_status
-            .as_ref()
-            .map(|status| status.connected)
-            .unwrap_or(false),
-        wifi_ssid: wifi_status.and_then(|status| status.configured_ssid),
+        wifi_connected,
+        wifi_ssid,
+        wifi_signal_dbm,
+        weather,
     }
 }
 
@@ -283,6 +347,7 @@ fn handle_command(
         Command::TimeSet(_) | Command::WifiSet { .. } | Command::WifiClear | Command::Refresh
     );
     match command {
+        Command::NextScreen | Command::PreviousScreen => unreachable!("handled by main loop"),
         Command::Ping => println!("OK PONG"),
         Command::Help => println!("{}", commands::help_text()),
         Command::TimeGet => match rtc.read(i2c) {
@@ -392,10 +457,14 @@ fn print_rtc_calibration(rtc: &Rtc, i2c: &mut I2cBus<'_>) {
 fn print_wifi_status(wifi: &WifiManager) {
     match wifi.status() {
         Ok(status) => println!(
-            "OK WIFI configured={} connected={} ip={}",
+            "OK WIFI configured={} connected={} ip={} rssi={}",
             status.configured_ssid.as_deref().unwrap_or("none"),
             status.connected,
-            status.ip.as_deref().unwrap_or("none")
+            status.ip.as_deref().unwrap_or("none"),
+            status
+                .signal_dbm
+                .map(|value| format!("{value}dBm"))
+                .unwrap_or_else(|| "none".to_owned())
         ),
         Err(error) => println!("ERR WIFI {error:#}"),
     }
