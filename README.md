@@ -25,10 +25,11 @@ The dashboard has three pages. Press **BOOT** to move forward and **PWR** to mov
 backward:
 
 1. Home: clock, date, indoor readings, and current weather.
-2. Today: city/country code, current conditions, humidity, daily mean, low,
-   high, and rain probability.
-3. Forecast: city/country code and side-by-side today/tomorrow conditions,
-   including daily means, lows, highs, rain, and maximum wind speed.
+2. Current details: city/country code, current conditions and temperature,
+   humidity, rain probability, and today's low, mean, and high temperatures.
+3. Tomorrow: city/country code and local-time snapshots for 08:00, 12:00,
+   18:00, and 23:00. Each row shows its condition icon and right-aligned
+   temperature; a cloud-with-rain icon and probability appear only above 0%.
 
 The display code uses a small in-project layout layer called **ink-stacks**.
 Every widget draws relative to the rectangle assigned by a horizontal or
@@ -90,8 +91,10 @@ After Wi-Fi connects, the firmware determines its approximate coordinates,
 city, and country code once using `ipwho.is` and saves them in NVS. Later boots
 reuse the complete location. Firmware upgrading from the old coordinate-only
 cache refreshes the location once to add the display name.
-Open-Meteo weather is fetched on boot and then on a dedicated worker thread every hour, so
-HTTPS requests never block input or dashboard rendering. A failed update is
+Open-Meteo weather is fetched on boot and then on a dedicated worker thread
+every hour, so HTTPS requests never block input or dashboard rendering. The
+response includes current conditions, today's daily aggregates, and tomorrow's
+hourly values sampled in the location's local timezone. A failed update is
 retried after five minutes and leaves the last successful weather reading on
 screen.
 
@@ -178,7 +181,7 @@ console and automatically returning to ordinary commands after playback.
 | `src/audio.rs` | ES8311 setup and temporary I2S tone playback |
 | `src/wifi.rs` | station-mode connection and NVS credential storage |
 | `src/location.rs` | cached coordinates and pluggable IP geolocation provider |
-| `src/weather.rs` | background Open-Meteo fetch and refresh scheduling |
+| `src/weather.rs` | current/daily/hourly Open-Meteo data and background refresh scheduling |
 | `src/ink_stacks.rs` | 1-bit framebuffer plus fixed/fill row and column layout |
 | `src/language.rs` | persistent language setting and extensible UI translation tables |
 | `src/dashboard.rs` | dashboard state, page selection, and render entry point |
