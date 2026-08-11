@@ -20,7 +20,7 @@ pub struct Weather {
     pub weather_code: u16,
     pub location: WeatherLocation,
     pub today: DailyForecast,
-    pub tomorrow: DailyForecast,
+    pub tomorrow_periods: [ForecastPeriod; 4],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -31,6 +31,13 @@ pub struct DailyForecast {
     pub maximum_temperature_c: f32,
     pub precipitation_probability_percent: Option<u8>,
     pub maximum_wind_speed_kmh: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ForecastPeriod {
+    pub weather_code: u16,
+    pub temperature_c: f32,
+    pub precipitation_probability_percent: Option<u8>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -108,7 +115,7 @@ impl CompactName {
     }
 }
 
-impl DailyForecast {
+impl ForecastPeriod {
     pub fn kind(self) -> WeatherKind {
         WeatherKind::from_code(self.weather_code)
     }
@@ -146,6 +153,7 @@ fn condition(code: u16) -> &'static str {
 struct OpenMeteoResponse {
     current: CurrentWeather,
     daily: DailyWeather,
+    hourly: HourlyWeather,
 }
 
 #[derive(Deserialize)]
@@ -165,10 +173,24 @@ struct DailyWeather {
     wind_speed_10m_max: [f64; 2],
 }
 
+#[derive(Deserialize)]
+struct HourlyWeather {
+    temperature_2m: Vec<f64>,
+    precipitation_probability: Vec<Option<u8>>,
+    weather_code: Vec<u16>,
+}
+
 pub fn fetch_weather(location: &Location) -> Result<Weather> {
+    const TOMORROW_START: usize = 24;
+    const MORNING_HOUR: usize = 8;
+    const DAY_HOUR: usize = 12;
+    const EVENING_HOUR: usize = 18;
+    const NIGHT_HOUR: usize = 23;
+
     let url = format!(
         "https://api.open-meteo.com/v1/forecast?latitude={:.6}&longitude={:.6}\
          &current=temperature_2m,relative_humidity_2m,weather_code\
+         &hourly=temperature_2m,precipitation_probability,weather_code\
          &daily=weather_code,temperature_2m_mean,temperature_2m_min,temperature_2m_max,precipitation_probability_max,wind_speed_10m_max\
          &forecast_days=2&timezone=auto",
         location.latitude, location.longitude
@@ -180,22 +202,64 @@ pub fn fetch_weather(location: &Location) -> Result<Weather> {
         weather_code: response.current.weather_code,
         location: WeatherLocation::new(&location.city, &location.country_code),
         today: daily_forecast(&response.daily, 0, "today")?,
-        tomorrow: daily_forecast(&response.daily, 1, "tomorrow")?,
+        tomorrow_periods: [
+            hourly_forecast(
+                &response.hourly,
+                TOMORROW_START + MORNING_HOUR,
+                "tomorrow morning",
+            )?,
+            hourly_forecast(&response.hourly, TOMORROW_START + DAY_HOUR, "tomorrow day")?,
+            hourly_forecast(
+                &response.hourly,
+                TOMORROW_START + EVENING_HOUR,
+                "tomorrow evening",
+            )?,
+            hourly_forecast(
+                &response.hourly,
+                TOMORROW_START + NIGHT_HOUR,
+                "tomorrow night",
+            )?,
+        ],
     };
     if weather.relative_humidity_percent > 100
-        || [weather.today, weather.tomorrow].iter().any(|day| {
-            day.precipitation_probability_percent
+        || weather
+            .today
+            .precipitation_probability_percent
+            .is_some_and(|value| value > 100)
+        || weather.today.minimum_temperature_c > weather.today.maximum_temperature_c
+        || weather.today.mean_temperature_c < weather.today.minimum_temperature_c
+        || weather.today.mean_temperature_c > weather.today.maximum_temperature_c
+        || !weather.today.maximum_wind_speed_kmh.is_finite()
+        || !(0.0..=500.0).contains(&weather.today.maximum_wind_speed_kmh)
+        || weather.tomorrow_periods.iter().any(|period| {
+            period
+                .precipitation_probability_percent
                 .is_some_and(|value| value > 100)
-                || day.minimum_temperature_c > day.maximum_temperature_c
-                || day.mean_temperature_c < day.minimum_temperature_c
-                || day.mean_temperature_c > day.maximum_temperature_c
-                || !day.maximum_wind_speed_kmh.is_finite()
-                || !(0.0..=500.0).contains(&day.maximum_wind_speed_kmh)
         })
     {
         bail!("Open-Meteo returned invalid weather values");
     }
     Ok(weather)
+}
+
+fn hourly_forecast(hourly: &HourlyWeather, index: usize, label: &str) -> Result<ForecastPeriod> {
+    let temperature = *hourly
+        .temperature_2m
+        .get(index)
+        .with_context(|| format!("Open-Meteo omitted {label} temperature"))?;
+    let precipitation_probability_percent = *hourly
+        .precipitation_probability
+        .get(index)
+        .with_context(|| format!("Open-Meteo omitted {label} precipitation probability"))?;
+    let weather_code = *hourly
+        .weather_code
+        .get(index)
+        .with_context(|| format!("Open-Meteo omitted {label} weather code"))?;
+    Ok(ForecastPeriod {
+        weather_code,
+        temperature_c: checked_temperature(temperature, label)?,
+        precipitation_probability_percent,
+    })
 }
 
 fn daily_forecast(daily: &DailyWeather, index: usize, label: &str) -> Result<DailyForecast> {

@@ -21,17 +21,11 @@ pub struct Translations {
     pub average: &'static str,
     pub low: &'static str,
     pub high: &'static str,
-    pub forecast: &'static str,
-    pub today: &'static str,
     pub tomorrow: &'static str,
-    pub wind: &'static str,
     pub location: &'static str,
     pub no_wifi: &'static str,
     pub humidity_short: &'static str,
     pub rain_short: &'static str,
-    pub high_short: &'static str,
-    pub low_short: &'static str,
-    pub kilometers_per_hour: &'static str,
 }
 
 const ENGLISH: Translations = Translations {
@@ -43,17 +37,11 @@ const ENGLISH: Translations = Translations {
     average: "AVERAGE",
     low: "LOW",
     high: "HIGH",
-    forecast: "FORECAST",
-    today: "TODAY",
     tomorrow: "TOMORROW",
-    wind: "WIND",
     location: "LOCATION",
     no_wifi: "No WiFi",
     humidity_short: "RH",
     rain_short: "R",
-    high_short: "H",
-    low_short: "L",
-    kilometers_per_hour: "KM/H",
 };
 
 const RUSSIAN: Translations = Translations {
@@ -62,20 +50,14 @@ const RUSSIAN: Translations = Translations {
     no_data: "НЕТ ДАННЫХ",
     now: "СЕЙЧАС",
     rain: "ДОЖДЬ",
-    average: "СРЕДНЯЯ",
+    average: "СРЕДН",
     low: "МИН",
     high: "МАКС",
-    forecast: "ПРОГНОЗ",
-    today: "СЕГОДНЯ",
     tomorrow: "ЗАВТРА",
-    wind: "ВЕТЕР",
     location: "МЕСТО",
     no_wifi: "Нет WiFi",
     humidity_short: "ВЛ",
     rain_short: "Д",
-    high_short: "МАКС",
-    low_short: "МИН",
-    kilometers_per_hour: "КМ/Ч",
 };
 
 impl Language {
@@ -127,24 +109,32 @@ impl Language {
     }
 
     pub fn short_date(self, weekday: u8, day: u8, month: u8) -> String {
-        const ENGLISH_WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
         const ENGLISH_MONTHS: [&str; 12] = [
             "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
         ];
-        const RUSSIAN_WEEKDAYS: [&str; 7] = ["Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
         const RUSSIAN_MONTHS: [&str; 12] = [
             "Янв", "Фев", "Мар", "Апр", "Май", "Июн", "Июл", "Авг", "Сен", "Окт", "Ноя", "Дек",
         ];
-        let (weekdays, months) = match self {
-            Self::English => (&ENGLISH_WEEKDAYS, &ENGLISH_MONTHS),
-            Self::Russian => (&RUSSIAN_WEEKDAYS, &RUSSIAN_MONTHS),
+        let months = match self {
+            Self::English => &ENGLISH_MONTHS,
+            Self::Russian => &RUSSIAN_MONTHS,
         };
         format!(
             "{} {} {}",
-            weekdays[weekday as usize],
+            self.short_weekday(weekday),
             day,
             months[month as usize - 1]
         )
+    }
+
+    pub const fn short_weekday(self, weekday: u8) -> &'static str {
+        const ENGLISH: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        const RUSSIAN: [&str; 7] = ["ВС", "ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ"];
+        let weekdays = match self {
+            Self::English => &ENGLISH,
+            Self::Russian => &RUSSIAN,
+        };
+        weekdays[weekday as usize]
     }
 
     const fn from_stored(value: u8) -> Option<Self> {

@@ -14,7 +14,7 @@ use crate::datetime::DateTime;
 use crate::ink_stacks::{Framebuffer, Stack, StackItem, Widget};
 use crate::language::Language;
 use crate::shtc3::ClimateReading;
-use crate::weather::{DailyForecast, Weather, WeatherKind};
+use crate::weather::{ForecastPeriod, Weather, WeatherKind};
 use crate::wifi::wifi_signal_bars;
 
 use super::{DashboardData, DashboardScreen};
@@ -664,27 +664,10 @@ impl<'a> ForecastScreen<'a> {
 impl Widget for ForecastScreen<'_> {
     fn draw(&self, target: &mut Framebuffer, bounds: Rectangle) {
         let text = self.language.translations();
-        let header = SectionHeader(weather_page_title(text.forecast, self.weather));
-        let today = ForecastDayWidget {
-            label: text.today,
-            day: self.weather.map(|value| value.today),
-            language: self.language,
+        let header = SectionHeader(weather_page_title(text.tomorrow, self.weather));
+        let forecast = TomorrowPeriodsWidget {
+            periods: self.weather.map(|value| &value.tomorrow_periods),
         };
-        let separator = VerticalRule {
-            top_inset: 0,
-            bottom_inset: 12,
-        };
-        let tomorrow = ForecastDayWidget {
-            label: text.tomorrow,
-            day: self.weather.map(|value| value.tomorrow),
-            language: self.language,
-        };
-        let columns = [
-            StackItem::fixed(&today, 100),
-            StackItem::fixed(&separator, 1),
-            StackItem::fill(&tomorrow, 1),
-        ];
-        let forecast = Stack::horizontal(&columns);
         let content_rows = [StackItem::fixed(&header, 24), StackItem::fill(&forecast, 1)];
         let content = Stack::vertical(&content_rows);
         let indicator = PageIndicator { active: 2 };
@@ -721,109 +704,74 @@ impl Widget for SectionHeader {
     }
 }
 
-struct ForecastDayWidget {
-    label: &'static str,
-    day: Option<DailyForecast>,
-    language: Language,
+struct TomorrowPeriodsWidget<'a> {
+    periods: Option<&'a [ForecastPeriod; 4]>,
 }
 
-impl Widget for ForecastDayWidget {
+impl Widget for TomorrowPeriodsWidget<'_> {
     fn draw(&self, target: &mut Framebuffer, bounds: Rectangle) {
-        let center = center_x(bounds);
-        let y = bounds.top_left.y;
-        let text = self.language.translations();
-        Text::with_text_style(
-            self.label,
-            Point::new(center, y + 1),
-            small(),
-            centered_top(),
-        )
-        .draw(target)
-        .ok();
-        draw_weather_icon(
-            target,
-            self.day.map(|value| value.kind()),
-            Point::new(center, y + 30),
-            thin(),
-            filled(),
-        );
-        Text::with_text_style(
-            self.day
-                .map(|value| self.language.condition(value.weather_code))
-                .unwrap_or(text.no_data),
-            Point::new(center, y + 47),
-            small(),
-            centered_top(),
-        )
-        .draw(target)
-        .ok();
-
-        let average = self
-            .day
-            .map(|value| format!("{:.1} C", value.mean_temperature_c))
-            .unwrap_or_else(|| "--.- C".to_owned());
-        let low = self
-            .day
-            .map(|value| format!("{:.0}", value.minimum_temperature_c))
-            .unwrap_or_else(|| "--".to_owned());
-        let high = self
-            .day
-            .map(|value| format!("{:.0}", value.maximum_temperature_c))
-            .unwrap_or_else(|| "--".to_owned());
-        let rain = self
-            .day
-            .and_then(|value| value.precipitation_probability_percent)
-            .map(|value| format!("{value}%"))
-            .unwrap_or_else(|| "--%".to_owned());
-        let wind = self
-            .day
-            .map(|value| {
-                format!(
-                    "{:.0} {}",
-                    value.maximum_wind_speed_kmh, text.kilometers_per_hour
+        let labels = ["08:00", "12:00", "18:00", "23:00"];
+        let row_height = bounds.size.height as i32 / 4;
+        for (index, label) in labels.iter().enumerate() {
+            let y = bounds.top_left.y + row_height * index as i32;
+            let period = self.periods.map(|periods| periods[index]);
+            Text::with_baseline(
+                label,
+                Point::new(bounds.top_left.x + 4, y + row_height / 2),
+                small(),
+                Baseline::Middle,
+            )
+            .draw(target)
+            .ok();
+            draw_weather_icon(
+                target,
+                period.map(|value| value.kind()),
+                Point::new(bounds.top_left.x + 78, y + row_height / 2),
+                thin(),
+                filled(),
+            );
+            let temperature = period
+                .map(|value| format!("{:.0} C", value.temperature_c))
+                .unwrap_or_else(|| "-- C".to_owned());
+            Text::with_text_style(
+                &temperature,
+                Point::new(bounds.top_left.x + 130, y + 9),
+                value_style(),
+                centered_top(),
+            )
+            .draw(target)
+            .ok();
+            let rain = period
+                .and_then(|value| value.precipitation_probability_percent)
+                .map(|value| format!("{value}%"))
+                .unwrap_or_else(|| "--%".to_owned());
+            draw_rain_probability_icon(
+                target,
+                Point::new(bounds.top_left.x + 164, y + row_height / 2),
+                filled(),
+                thin(),
+            );
+            Text::with_baseline(
+                &rain,
+                Point::new(bounds.top_left.x + 174, y + row_height / 2),
+                small(),
+                Baseline::Middle,
+            )
+            .draw(target)
+            .ok();
+            if index < labels.len() - 1 {
+                Line::new(
+                    Point::new(bounds.top_left.x + 4, y + row_height - 1),
+                    Point::new(
+                        bounds.top_left.x + bounds.size.width as i32 - 5,
+                        y + row_height - 1,
+                    ),
                 )
-            })
-            .unwrap_or_else(|| format!("-- {}", text.kilometers_per_hour));
-        Text::with_text_style(
-            text.average,
-            Point::new(center, y + 63),
-            small(),
-            centered_top(),
-        )
-        .draw(target)
-        .ok();
-        Text::with_text_style(
-            &average,
-            Point::new(center, y + 75),
-            value_style(),
-            centered_top(),
-        )
-        .draw(target)
-        .ok();
-        Text::with_text_style(
-            &format!("{}{high} {}{low} C", text.high_short, text.low_short),
-            Point::new(center, y + 96),
-            small(),
-            centered_top(),
-        )
-        .draw(target)
-        .ok();
-        Text::with_text_style(
-            &format!("{} {rain}", text.rain),
-            Point::new(center, y + 110),
-            small(),
-            centered_top(),
-        )
-        .draw(target)
-        .ok();
-        Text::with_text_style(
-            &format!("{} {wind}", text.wind),
-            Point::new(center, y + 124),
-            small(),
-            centered_top(),
-        )
-        .draw(target)
-        .ok();
+                .into_styled(thin())
+                .draw(target)
+                .ok();
+            }
+        }
     }
 }
 
@@ -1036,6 +984,36 @@ fn draw_drop_icon(target: &mut Framebuffer, center: Point, filled: PrimitiveStyl
         .into_styled(filled)
         .draw(target)
         .ok();
+}
+
+fn draw_rain_probability_icon(
+    target: &mut Framebuffer,
+    center: Point,
+    filled: PrimitiveStyle<BinaryColor>,
+    thin: PrimitiveStyle<BinaryColor>,
+) {
+    Rectangle::new(center + Point::new(-7, -4), Size::new(14, 5))
+        .into_styled(filled)
+        .draw(target)
+        .ok();
+    Circle::new(center + Point::new(-7, -8), 8)
+        .into_styled(filled)
+        .draw(target)
+        .ok();
+    Circle::new(center + Point::new(-2, -11), 10)
+        .into_styled(filled)
+        .draw(target)
+        .ok();
+    Circle::new(center + Point::new(3, -7), 7)
+        .into_styled(filled)
+        .draw(target)
+        .ok();
+    for x in [-4, 3] {
+        Line::new(center + Point::new(x + 1, 3), center + Point::new(x - 1, 7))
+            .into_styled(thin)
+            .draw(target)
+            .ok();
+    }
 }
 
 fn draw_weather_icon(
