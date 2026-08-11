@@ -735,30 +735,31 @@ impl Widget for TomorrowPeriodsWidget<'_> {
                 .unwrap_or_else(|| "-- C".to_owned());
             Text::with_text_style(
                 &temperature,
-                Point::new(bounds.top_left.x + 130, y + 9),
+                Point::new(bounds.top_left.x + 175, y + 9),
                 value_style(),
                 centered_top(),
             )
             .draw(target)
             .ok();
-            let rain = period
+            if let Some(rain) = period
                 .and_then(|value| value.precipitation_probability_percent)
-                .map(|value| format!("{value}%"))
-                .unwrap_or_else(|| "--%".to_owned());
-            draw_rain_probability_icon(
-                target,
-                Point::new(bounds.top_left.x + 164, y + row_height / 2),
-                filled(),
-                thin(),
-            );
-            Text::with_baseline(
-                &rain,
-                Point::new(bounds.top_left.x + 174, y + row_height / 2),
-                small(),
-                Baseline::Middle,
-            )
-            .draw(target)
-            .ok();
+                .filter(|value| *value > 0)
+            {
+                draw_rain_probability_icon(
+                    target,
+                    Point::new(bounds.top_left.x + 115, y + row_height / 2),
+                    filled(),
+                    thin(),
+                );
+                Text::with_baseline(
+                    &format!("{rain}%"),
+                    Point::new(bounds.top_left.x + 125, y + row_height / 2),
+                    small(),
+                    Baseline::Middle,
+                )
+                .draw(target)
+                .ok();
+            }
             if index < labels.len() - 1 {
                 Line::new(
                     Point::new(bounds.top_left.x + 4, y + row_height - 1),
