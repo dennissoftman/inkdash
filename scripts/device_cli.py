@@ -105,6 +105,18 @@ def build_parser() -> argparse.ArgumentParser:
     wifi_commands.add_parser("scan", help="list nearby networks and signal strength")
     wifi_commands.add_parser("clear", help="disconnect and erase saved credentials")
 
+    language_parser = commands.add_parser(
+        "language", help="read or set the persistent display language"
+    )
+    language_commands = language_parser.add_subparsers(
+        dest="language_command", required=True
+    )
+    language_commands.add_parser("get", help="show the active display language")
+    language_set = language_commands.add_parser(
+        "set", help="set the display language and refresh the screen"
+    )
+    language_set.add_argument("language", choices=("en", "ru"))
+
     commands.add_parser("status", help="show RTC and Wi-Fi status")
     commands.add_parser("refresh", help="request an immediate display refresh")
     audio_parser = commands.add_parser("audio", help="test the onboard speaker")
@@ -210,6 +222,11 @@ def command_for(args: argparse.Namespace) -> tuple[str | None, int]:
             f"{quote_device_argument(password)}",
             1,
         )
+
+    if args.command == "language":
+        if args.language_command == "get":
+            return "LANGUAGE GET", 1
+        return f"LANGUAGE SET {args.language.upper()}", 1
 
     if args.command == "status":
         return "STATUS", 2

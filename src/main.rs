@@ -9,6 +9,7 @@ mod epaper;
 mod events;
 mod i2c_bus;
 mod ink_stacks;
+mod language;
 mod location;
 mod power;
 mod rtc;
@@ -45,6 +46,7 @@ use esp_idf_svc::wifi::WifiEvent;
 use events::AppEvent;
 use i2c_bus::I2cBus;
 use ink_stacks::Framebuffer;
+use language::{Language, LanguageStore};
 use rtc::Rtc;
 use shtc3::Shtc3;
 use weather::{WeatherService, FAILURE_RETRY_INTERVAL, REFRESH_INTERVAL};
@@ -131,6 +133,8 @@ fn main() -> Result<()> {
 
     let system_loop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
+    let language_store = LanguageStore::new(nvs.clone())?;
+    let language = language_store.load()?;
     let (event_sender, events) = events::channel();
 
     let wifi_sender = event_sender.clone();
@@ -195,6 +199,7 @@ fn main() -> Result<()> {
         weather.latest(),
         power::usb_host_connected(),
     );
+    data.language = language;
     schedule_clock(&clock_timer, data.time)?;
     weather_timer.after(Duration::from_millis(1))?;
 
@@ -285,6 +290,7 @@ fn main() -> Result<()> {
                 AppEvent::Command(Ok(command)) => {
                     let clock_changed = matches!(&command, Command::TimeSet(_));
                     let explicit_refresh = matches!(&command, Command::Refresh);
+                    let language_changed = matches!(&command, Command::LanguageSet(_));
                     match command {
                         Command::NextScreen => {
                             screen = screen.next();
@@ -297,7 +303,15 @@ fn main() -> Result<()> {
                             force_full_refresh = true;
                         }
                         command => {
-                            if handle_command(command, &rtc, &mut i2c, &mut wifi, &mut audio) {
+                            if handle_command(
+                                command,
+                                &rtc,
+                                &mut i2c,
+                                &mut wifi,
+                                &mut audio,
+                                &language_store,
+                                &mut data.language,
+                            ) {
                                 refresh_dashboard_data(
                                     &mut data,
                                     &rtc,
@@ -312,6 +326,9 @@ fn main() -> Result<()> {
                         }
                     }
                     if explicit_refresh {
+                        force_full_refresh = true;
+                    }
+                    if language_changed {
                         force_full_refresh = true;
                     }
                     if clock_changed {
@@ -397,6 +414,7 @@ fn refresh_dashboard_data<'d, C, M>(
     C: AdcChannel,
     M: Borrow<AdcDriver<'d, C::AdcUnit>>,
 {
+    let language = data.language;
     *data = collect_dashboard_data(
         rtc,
         climate_sensor,
@@ -406,6 +424,7 @@ fn refresh_dashboard_data<'d, C, M>(
         weather,
         power::usb_host_connected(),
     );
+    data.language = language;
 }
 
 fn update_wifi_data(data: &mut DashboardData, wifi: &WifiManager) {
@@ -465,6 +484,7 @@ where
         wifi_ssid,
         wifi_signal_dbm,
         weather,
+        language: Language::default(),
     }
 }
 
@@ -474,10 +494,16 @@ fn handle_command(
     i2c: &mut I2cBus<'_>,
     wifi: &mut WifiManager,
     audio: &mut Audio<'_>,
+    language_store: &LanguageStore,
+    language: &mut Language,
 ) -> bool {
     let refresh = matches!(
         &command,
-        Command::TimeSet(_) | Command::WifiSet { .. } | Command::WifiClear | Command::Refresh
+        Command::TimeSet(_)
+            | Command::LanguageSet(_)
+            | Command::WifiSet { .. }
+            | Command::WifiClear
+            | Command::Refresh
     );
     match command {
         Command::NextScreen | Command::PreviousScreen => unreachable!("handled by main loop"),
@@ -503,6 +529,14 @@ fn handle_command(
                 Err(error) => println!("ERR TIME CALIBRATION {error:#}"),
             }
         }
+        Command::LanguageGet => println!("OK LANGUAGE {}", language.code()),
+        Command::LanguageSet(value) => match language_store.save(value) {
+            Ok(()) => {
+                *language = value;
+                println!("OK LANGUAGE {}", value.code());
+            }
+            Err(error) => println!("ERR LANGUAGE {error:#}"),
+        },
         Command::WifiSet { ssid, password } => {
             let credentials = WifiCredentials {
                 ssid: ssid.clone(),

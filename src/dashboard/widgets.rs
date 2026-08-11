@@ -2,7 +2,7 @@ use std::convert::Infallible;
 
 use embedded_graphics::draw_target::DrawTarget;
 use embedded_graphics::geometry::{OriginDimensions, Point, Size};
-use embedded_graphics::mono_font::ascii::{FONT_10X20, FONT_6X10, FONT_9X15_BOLD};
+use embedded_graphics::mono_font::iso_8859_5::{FONT_10X20, FONT_6X10, FONT_9X15_BOLD};
 use embedded_graphics::mono_font::MonoTextStyle;
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::*;
@@ -12,6 +12,7 @@ use embedded_graphics::text::{Alignment, Baseline, Text, TextStyleBuilder};
 use crate::battery::{BatteryReading, BatteryStatus};
 use crate::datetime::DateTime;
 use crate::ink_stacks::{Framebuffer, Stack, StackItem, Widget};
+use crate::language::Language;
 use crate::shtc3::ClimateReading;
 use crate::weather::{DailyForecast, Weather, WeatherKind};
 use crate::wifi::wifi_signal_bars;
@@ -50,6 +51,7 @@ impl Widget for StatusBar<'_> {
             connected: self.data.wifi_connected,
             signal_dbm: self.data.wifi_signal_dbm,
             ssid: self.data.wifi_ssid.as_deref(),
+            language: self.data.language,
         };
         let battery = BatteryWidget(self.data.battery);
         let children = [StackItem::fill(&wifi, 1), StackItem::fixed(&battery, 44)];
@@ -72,6 +74,7 @@ struct WifiBadge<'a> {
     connected: bool,
     signal_dbm: Option<i8>,
     ssid: Option<&'a str>,
+    language: Language,
 }
 
 impl Widget for WifiBadge<'_> {
@@ -82,6 +85,7 @@ impl Widget for WifiBadge<'_> {
             self.connected,
             self.signal_dbm,
             self.ssid,
+            self.language,
             filled(),
         );
     }
@@ -107,13 +111,22 @@ impl<'a> HomeScreen<'a> {
 
 impl Widget for HomeScreen<'_> {
     fn draw(&self, target: &mut Framebuffer, bounds: Rectangle) {
-        let clock = ClockWidget(self.data.time);
-        let indoor = IndoorWidget(self.data.climate);
+        let clock = ClockWidget {
+            time: self.data.time,
+            language: self.data.language,
+        };
+        let indoor = IndoorWidget {
+            reading: self.data.climate,
+            language: self.data.language,
+        };
         let separator = VerticalRule {
             top_inset: 9,
             bottom_inset: 0,
         };
-        let weather = CurrentWeatherWidget(self.data.weather.as_deref());
+        let weather = CurrentWeatherWidget {
+            weather: self.data.weather.as_deref(),
+            language: self.data.language,
+        };
         let columns = [
             StackItem::fixed(&indoor, 100),
             StackItem::fixed(&separator, 1),
@@ -130,15 +143,18 @@ impl Widget for HomeScreen<'_> {
     }
 }
 
-struct ClockWidget(Option<DateTime>);
+struct ClockWidget {
+    time: Option<DateTime>,
+    language: Language,
+}
 
 impl Widget for ClockWidget {
     fn draw(&self, target: &mut Framebuffer, bounds: Rectangle) {
         let time = self
-            .0
+            .time
             .map(|value| format!("{:02}:{:02}", value.hour, value.minute))
             .unwrap_or_else(|| "--:--".to_owned());
-        let color = draw_time_background(target, bounds, self.0, thin(), filled());
+        let color = draw_time_background(target, bounds, self.time, thin(), filled());
         draw_double_size_time(
             target,
             &time,
@@ -146,8 +162,8 @@ impl Widget for ClockWidget {
             color,
         );
         let date = self
-            .0
-            .map(|value| value.short_date())
+            .time
+            .map(|value| value.short_date(self.language))
             .unwrap_or_else(|| "--- -- ---".to_owned());
         Text::with_text_style(
             &date,
@@ -169,12 +185,15 @@ impl Widget for ClockWidget {
     }
 }
 
-struct IndoorWidget(Option<ClimateReading>);
+struct IndoorWidget {
+    reading: Option<ClimateReading>,
+    language: Language,
+}
 
 impl Widget for IndoorWidget {
     fn draw(&self, target: &mut Framebuffer, bounds: Rectangle) {
         Text::with_text_style(
-            "INDOOR",
+            self.language.translations().indoor,
             Point::new(center_x(bounds), bounds.top_left.y + 10),
             small(),
             centered_top(),
@@ -182,11 +201,11 @@ impl Widget for IndoorWidget {
         .draw(target)
         .ok();
         let temperature = self
-            .0
+            .reading
             .map(|reading| format!("{:.1} C", reading.temperature_c))
             .unwrap_or_else(|| "--.- C".to_owned());
         let humidity = self
-            .0
+            .reading
             .map(|reading| format!("{:.0}%", reading.humidity_percent))
             .unwrap_or_else(|| "--%".to_owned());
         draw_thermometer_icon(
@@ -215,11 +234,14 @@ impl Widget for IndoorWidget {
     }
 }
 
-struct CurrentWeatherWidget<'a>(Option<&'a Weather>);
+struct CurrentWeatherWidget<'a> {
+    weather: Option<&'a Weather>,
+    language: Language,
+}
 
 impl Widget for CurrentWeatherWidget<'_> {
     fn draw(&self, target: &mut Framebuffer, bounds: Rectangle) {
-        draw_weather_widget(target, bounds, self.0);
+        draw_weather_widget(target, bounds, self.weather, self.language);
     }
 }
 
@@ -352,6 +374,7 @@ fn draw_wifi_badge(
     connected: bool,
     signal_dbm: Option<i8>,
     ssid: Option<&str>,
+    language: Language,
     filled: PrimitiveStyle<BinaryColor>,
 ) {
     let active_bars = wifi_signal_bars(connected, signal_dbm) as usize;
@@ -369,9 +392,8 @@ fn draw_wifi_badge(
         .ok();
     }
 
-    // Reserve the right side for the battery indicator. Non-ASCII glyphs are
-    // represented by '?' because this compact built-in font is ASCII-only.
-    let label = compact_ssid(ssid);
+    // Reserve the right side for the battery indicator.
+    let label = compact_ssid(ssid, language.translations().no_wifi);
     let style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
     Text::with_baseline(
         &label,
@@ -383,10 +405,16 @@ fn draw_wifi_badge(
     .ok();
 }
 
-fn draw_weather_widget(target: &mut Framebuffer, bounds: Rectangle, weather: Option<&Weather>) {
+fn draw_weather_widget(
+    target: &mut Framebuffer,
+    bounds: Rectangle,
+    weather: Option<&Weather>,
+    language: Language,
+) {
     let center = center_x(bounds);
+    let text = language.translations();
     Text::with_text_style(
-        "WEATHER",
+        text.weather,
         Point::new(center, bounds.top_left.y + 10),
         small(),
         centered_top(),
@@ -414,8 +442,8 @@ fn draw_weather_widget(target: &mut Framebuffer, bounds: Rectangle, weather: Opt
     .ok();
 
     let average = weather
-        .map(|value| format!("AVG {:.1} C", value.today.mean_temperature_c))
-        .unwrap_or_else(|| "AVG --.- C".to_owned());
+        .map(|value| format!("{} {:.1} C", text.average, value.today.mean_temperature_c))
+        .unwrap_or_else(|| format!("{} --.- C", text.average));
     Text::with_text_style(
         &average,
         Point::new(center, bounds.top_left.y + 61),
@@ -428,11 +456,17 @@ fn draw_weather_widget(target: &mut Framebuffer, bounds: Rectangle, weather: Opt
     let details = weather
         .map(
             |value| match value.today.precipitation_probability_percent {
-                Some(rain) => format!("RH{}% R{}%", value.relative_humidity_percent, rain),
-                None => format!("RH{}% R--%", value.relative_humidity_percent),
+                Some(rain) => format!(
+                    "{}{}% {}{}%",
+                    text.humidity_short, value.relative_humidity_percent, text.rain_short, rain
+                ),
+                None => format!(
+                    "{}{}% {}--%",
+                    text.humidity_short, value.relative_humidity_percent, text.rain_short
+                ),
             },
         )
-        .unwrap_or_else(|| "RH--% R--%".to_owned());
+        .unwrap_or_else(|| format!("{}--% {}--%", text.humidity_short, text.rain_short));
     Text::with_text_style(
         &details,
         Point::new(center, bounds.top_left.y + 72),
@@ -474,7 +508,9 @@ impl Widget for TodayContent<'_> {
         let x = bounds.top_left.x;
         let y = bounds.top_left.y;
         let weather = self.data.weather.as_deref();
-        let title = weather_location_title(weather);
+        let language = self.data.language;
+        let text = language.translations();
+        let title = weather_location_title(weather, language);
         Text::with_text_style(
             &title,
             Point::new(center_x(bounds), y + 2),
@@ -499,7 +535,9 @@ impl Widget for TodayContent<'_> {
             filled(),
         );
         Text::with_text_style(
-            weather.map(|value| value.condition()).unwrap_or("NO DATA"),
+            weather
+                .map(|value| language.condition(value.weather_code))
+                .unwrap_or(text.no_data),
             Point::new(x + 47, y + 59),
             small(),
             centered_top(),
@@ -508,17 +546,22 @@ impl Widget for TodayContent<'_> {
         .ok();
         let rain = weather
             .and_then(|value| value.today.precipitation_probability_percent)
-            .map(|value| format!("RAIN {value}%"))
-            .unwrap_or_else(|| "RAIN --%".to_owned());
+            .map(|value| format!("{} {value}%", text.rain))
+            .unwrap_or_else(|| format!("{} --%", text.rain));
         Text::with_text_style(&rain, Point::new(x + 47, y + 70), small(), centered_top())
             .draw(target)
             .ok();
         let temperature = weather
             .map(|value| format!("{:.1} C", value.temperature_c))
             .unwrap_or_else(|| "--.- C".to_owned());
-        Text::with_text_style("NOW", Point::new(x + 142, y + 21), small(), centered_top())
-            .draw(target)
-            .ok();
+        Text::with_text_style(
+            text.now,
+            Point::new(x + 142, y + 21),
+            small(),
+            centered_top(),
+        )
+        .draw(target)
+        .ok();
         Text::with_text_style(
             &temperature,
             Point::new(x + 142, y + 33),
@@ -559,15 +602,15 @@ impl Widget for TodayContent<'_> {
 
         let day = weather.map(|value| value.today);
         let average = MetricWidget {
-            label: "AVERAGE",
+            label: text.average,
             value: day.map(|value| format!("{:.1} C", value.mean_temperature_c)),
         };
         let low = MetricWidget {
-            label: "LOW",
+            label: text.low,
             value: day.map(|value| format!("{:.0} C", value.minimum_temperature_c)),
         };
         let high = MetricWidget {
-            label: "HIGH",
+            label: text.high,
             value: day.map(|value| format!("{:.0} C", value.maximum_temperature_c)),
         };
         let metrics = [
@@ -606,30 +649,35 @@ impl Widget for MetricWidget {
 
 struct ForecastScreen<'a> {
     weather: Option<&'a Weather>,
+    language: Language,
 }
 
 impl<'a> ForecastScreen<'a> {
     fn new(data: &'a DashboardData) -> Self {
         Self {
             weather: data.weather.as_deref(),
+            language: data.language,
         }
     }
 }
 
 impl Widget for ForecastScreen<'_> {
     fn draw(&self, target: &mut Framebuffer, bounds: Rectangle) {
-        let header = SectionHeader(weather_page_title("FORECAST", self.weather));
+        let text = self.language.translations();
+        let header = SectionHeader(weather_page_title(text.forecast, self.weather));
         let today = ForecastDayWidget {
-            label: "TODAY",
+            label: text.today,
             day: self.weather.map(|value| value.today),
+            language: self.language,
         };
         let separator = VerticalRule {
             top_inset: 0,
             bottom_inset: 12,
         };
         let tomorrow = ForecastDayWidget {
-            label: "TOMORROW",
+            label: text.tomorrow,
             day: self.weather.map(|value| value.tomorrow),
+            language: self.language,
         };
         let columns = [
             StackItem::fixed(&today, 100),
@@ -676,12 +724,14 @@ impl Widget for SectionHeader {
 struct ForecastDayWidget {
     label: &'static str,
     day: Option<DailyForecast>,
+    language: Language,
 }
 
 impl Widget for ForecastDayWidget {
     fn draw(&self, target: &mut Framebuffer, bounds: Rectangle) {
         let center = center_x(bounds);
         let y = bounds.top_left.y;
+        let text = self.language.translations();
         Text::with_text_style(
             self.label,
             Point::new(center, y + 1),
@@ -698,7 +748,9 @@ impl Widget for ForecastDayWidget {
             filled(),
         );
         Text::with_text_style(
-            self.day.map(|value| value.condition()).unwrap_or("NO DATA"),
+            self.day
+                .map(|value| self.language.condition(value.weather_code))
+                .unwrap_or(text.no_data),
             Point::new(center, y + 47),
             small(),
             centered_top(),
@@ -725,10 +777,15 @@ impl Widget for ForecastDayWidget {
             .unwrap_or_else(|| "--%".to_owned());
         let wind = self
             .day
-            .map(|value| format!("{:.0} KM/H", value.maximum_wind_speed_kmh))
-            .unwrap_or_else(|| "-- KM/H".to_owned());
+            .map(|value| {
+                format!(
+                    "{:.0} {}",
+                    value.maximum_wind_speed_kmh, text.kilometers_per_hour
+                )
+            })
+            .unwrap_or_else(|| format!("-- {}", text.kilometers_per_hour));
         Text::with_text_style(
-            "AVERAGE",
+            text.average,
             Point::new(center, y + 63),
             small(),
             centered_top(),
@@ -744,7 +801,7 @@ impl Widget for ForecastDayWidget {
         .draw(target)
         .ok();
         Text::with_text_style(
-            &format!("H {high}  L {low} C"),
+            &format!("{}{high} {}{low} C", text.high_short, text.low_short),
             Point::new(center, y + 96),
             small(),
             centered_top(),
@@ -752,7 +809,7 @@ impl Widget for ForecastDayWidget {
         .draw(target)
         .ok();
         Text::with_text_style(
-            &format!("RAIN {rain}"),
+            &format!("{} {rain}", text.rain),
             Point::new(center, y + 110),
             small(),
             centered_top(),
@@ -760,7 +817,7 @@ impl Widget for ForecastDayWidget {
         .draw(target)
         .ok();
         Text::with_text_style(
-            &format!("WIND {wind}"),
+            &format!("{} {wind}", text.wind),
             Point::new(center, y + 124),
             small(),
             centered_top(),
@@ -1104,11 +1161,11 @@ fn draw_filled_cloud(target: &mut Framebuffer, center: Point, filled: PrimitiveS
         .ok();
 }
 
-fn compact_ssid(ssid: Option<&str>) -> String {
+fn compact_ssid(ssid: Option<&str>, missing_label: &str) -> String {
     const MAX_CHARS: usize = 20;
 
     let Some(ssid) = ssid else {
-        return "No WiFi".to_owned();
+        return missing_label.to_owned();
     };
     let mut label = String::with_capacity(MAX_CHARS);
     let mut characters = ssid.chars();
@@ -1139,7 +1196,7 @@ fn weather_page_title(prefix: &str, weather: Option<&Weather>) -> String {
     )
 }
 
-fn weather_location_title(weather: Option<&Weather>) -> String {
+fn weather_location_title(weather: Option<&Weather>, language: Language) -> String {
     // FONT_9X15_BOLD is nine pixels wide; 21 characters leave a small margin.
     const MAX_CHARS: usize = 21;
 
@@ -1151,7 +1208,7 @@ fn weather_location_title(weather: Option<&Weather>) -> String {
                 MAX_CHARS,
             )
         })
-        .unwrap_or_else(|| "LOCATION".to_owned())
+        .unwrap_or_else(|| language.translations().location.to_owned())
 }
 
 fn compact_location(city: &str, country: &str, max_chars: usize) -> String {

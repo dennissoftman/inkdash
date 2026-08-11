@@ -112,10 +112,6 @@ impl DailyForecast {
     pub fn kind(self) -> WeatherKind {
         WeatherKind::from_code(self.weather_code)
     }
-
-    pub fn condition(self) -> &'static str {
-        condition(self.weather_code)
-    }
 }
 
 impl WeatherKind {

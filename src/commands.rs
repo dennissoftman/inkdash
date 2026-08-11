@@ -10,6 +10,7 @@ use crate::audio::{
 };
 use crate::datetime::DateTime;
 use crate::events::{AppEvent, EventSender};
+use crate::language::Language;
 
 #[derive(Clone, Debug)]
 pub enum Command {
@@ -21,6 +22,8 @@ pub enum Command {
     TimeSet(DateTime),
     TimeCalibrationGet,
     TimeCalibrationSet(f32),
+    LanguageGet,
+    LanguageSet(Language),
     WifiSet {
         ssid: String,
         password: String,
@@ -135,6 +138,8 @@ pub fn help_text() -> &'static str {
      TIME SET YYYY-MM-DD HH:MM:SS\n\
      TIME CALIBRATION GET\n\
      TIME CALIBRATION SET <measured_drift_ppm>\n\
+     LANGUAGE GET\n\
+     LANGUAGE SET <en|ru>\n\
      WIFI SET \"ssid\" \"password\"\n\
      WIFI SCAN\n\
      WIFI STATUS\n\
@@ -215,6 +220,12 @@ fn parse(line: &str) -> Result<Command> {
                 _ => bail!("usage: TIME SET YYYY-MM-DD HH:MM:SS"),
             };
             Ok(Command::TimeSet(DateTime::parse(&value)?))
+        }
+        [group, action] if group == "LANGUAGE" && action == "GET" => Ok(Command::LanguageGet),
+        [group, action, value] if group == "LANGUAGE" && action == "SET" => {
+            let language =
+                Language::parse(value).context("language must be en/english or ru/russian")?;
+            Ok(Command::LanguageSet(language))
         }
         [group, action] if group == "WIFI" && action == "STATUS" => Ok(Command::WifiStatus),
         [group, action] if group == "WIFI" && action == "SCAN" => Ok(Command::WifiScan),

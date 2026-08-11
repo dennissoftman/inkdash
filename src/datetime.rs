@@ -1,6 +1,8 @@
 use anyhow::{bail, Context, Result};
 use std::fmt;
 
+use crate::language::Language;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DateTime {
     pub year: u16,
@@ -70,17 +72,8 @@ impl DateTime {
             % 7) as u8
     }
 
-    pub fn short_date(&self) -> String {
-        const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-        const MONTHS: [&str; 12] = [
-            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-        ];
-        format!(
-            "{} {} {}",
-            WEEKDAYS[self.weekday() as usize],
-            self.day,
-            MONTHS[self.month as usize - 1]
-        )
+    pub fn short_date(&self, language: Language) -> String {
+        language.short_date(self.weekday(), self.day, self.month)
     }
 }
 

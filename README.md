@@ -43,6 +43,13 @@ view, and framebuffer reconciliation decides whether any panel work is needed.
 Widget properties may change without causing a refresh when their pixels remain
 identical.
 
+The display language is stored in NVS and defaults to English. English (`en`)
+and Russian (`ru`) are currently available; changing it redraws the active page
+immediately. UI copy and date abbreviations live in one translation table in
+`src/language.rs`, and the display uses the ISO-8859-5 variants of its bitmap
+fonts so Cyrillic and ASCII share the same layout code. The USB command protocol
+continues to use stable language codes and English command names.
+
 Both buttons are active-low, interrupt-driven, and software-debounced after an
 edge. Holding BOOT while resetting still invokes the ESP32-S3 ROM download
 behavior, so normal navigation uses short presses after startup.
@@ -64,6 +71,8 @@ WIFI SET "My WiFi" "my secret password"
 WIFI SCAN
 WIFI STATUS
 WIFI CLEAR
+LANGUAGE GET
+LANGUAGE SET ru
 STATUS
 REFRESH
 AUDIO BEEP 880 500 45
@@ -117,6 +126,9 @@ python3 scripts/device_cli.py wifi scan
 python3 scripts/device_cli.py wifi status
 python3 scripts/device_cli.py wifi clear
 
+python3 scripts/device_cli.py language get
+python3 scripts/device_cli.py language set ru
+
 python3 scripts/device_cli.py status
 python3 scripts/device_cli.py refresh
 python3 scripts/device_cli.py audio beep
@@ -168,6 +180,7 @@ console and automatically returning to ordinary commands after playback.
 | `src/location.rs` | cached coordinates and pluggable IP geolocation provider |
 | `src/weather.rs` | background Open-Meteo fetch and refresh scheduling |
 | `src/ink_stacks.rs` | 1-bit framebuffer plus fixed/fill row and column layout |
+| `src/language.rs` | persistent language setting and extensible UI translation tables |
 | `src/dashboard.rs` | dashboard state, page selection, and render entry point |
 | `src/dashboard/widgets.rs` | composable status, clock, climate, and weather widgets |
 | `src/epaper.rs` | SPI panel driver, dirty-window writes, and refresh waveforms |

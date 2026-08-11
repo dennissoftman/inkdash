@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::battery::BatteryStatus;
 use crate::datetime::DateTime;
 use crate::ink_stacks::Framebuffer;
+use crate::language::Language;
 use crate::shtc3::ClimateReading;
 use crate::weather::Weather;
 
@@ -16,6 +17,7 @@ pub struct DashboardData {
     pub wifi_ssid: Option<String>,
     pub wifi_signal_dbm: Option<i8>,
     pub weather: Option<Arc<Weather>>,
+    pub language: Language,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
