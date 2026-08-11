@@ -1,16 +1,17 @@
 use std::io::{self, ErrorKind, Read};
-use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread;
 
 use anyhow::{anyhow, bail, Context, Result};
+use esp_idf_svc::sys::{self, EspError};
 
 use crate::audio::{
     Waveform, DEFAULT_DURATION_MS, DEFAULT_FREQUENCY_HZ, DEFAULT_VOLUME_PERCENT,
     SUPPORTED_SAMPLE_RATES,
 };
 use crate::datetime::DateTime;
+use crate::events::{AppEvent, EventSender};
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Command {
     NextScreen,
     PreviousScreen,
@@ -45,10 +46,16 @@ pub enum Command {
 }
 
 pub type CommandMessage = Result<Command, String>;
-pub type CommandSender = SyncSender<CommandMessage>;
 
-pub fn start_usb_console() -> Result<(CommandSender, Receiver<CommandMessage>)> {
-    let (sender, receiver) = mpsc::sync_channel(8);
+pub fn start_usb_console(sender: EventSender) -> Result<()> {
+    let mut config = sys::usb_serial_jtag_driver_config_t {
+        tx_buffer_size: 1024,
+        rx_buffer_size: 1024,
+    };
+    EspError::convert(unsafe { sys::usb_serial_jtag_driver_install(&mut config) })
+        .context("installing blocking USB Serial/JTAG driver")?;
+    unsafe { usb_serial_jtag_vfs_use_driver() };
+
     let console_sender = sender.clone();
     thread::Builder::new()
         .name("usb-console".into())
@@ -62,7 +69,11 @@ pub fn start_usb_console() -> Result<(CommandSender, Receiver<CommandMessage>)> 
 
             'read: loop {
                 match input.read(&mut read_buffer) {
-                    Ok(0) => thread::sleep(std::time::Duration::from_millis(20)),
+                    Ok(0) => {
+                        let _ = console_sender
+                            .send(AppEvent::Command(Err("USB input stream closed".into())));
+                        break;
+                    }
                     Ok(length) => {
                         let mut offset = 0;
                         while offset < length {
@@ -72,7 +83,9 @@ pub fn start_usb_console() -> Result<(CommandSender, Receiver<CommandMessage>)> 
                                 b'\r' | b'\n' => {
                                     if overflowed {
                                         if console_sender
-                                            .send(Err("command exceeds 256 bytes".into()))
+                                            .send(AppEvent::Command(Err(
+                                                "command exceeds 256 bytes".into(),
+                                            )))
                                             .is_err()
                                         {
                                             break 'read;
@@ -83,7 +96,7 @@ pub fn start_usb_console() -> Result<(CommandSender, Receiver<CommandMessage>)> 
                                             .and_then(|text| {
                                                 parse(text).map_err(|error| format!("{error:#}"))
                                             });
-                                        if console_sender.send(parsed).is_err() {
+                                        if console_sender.send(AppEvent::Command(parsed)).is_err() {
                                             break 'read;
                                         }
                                     }
@@ -98,23 +111,21 @@ pub fn start_usb_console() -> Result<(CommandSender, Receiver<CommandMessage>)> 
                             }
                         }
                     }
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            ErrorKind::WouldBlock | ErrorKind::Interrupted
-                        ) =>
-                    {
-                        thread::sleep(std::time::Duration::from_millis(20));
-                    }
+                    Err(error) if error.kind() == ErrorKind::Interrupted => continue,
                     Err(error) => {
-                        let _ = console_sender.send(Err(format!("USB input error: {error}")));
-                        thread::sleep(std::time::Duration::from_millis(250));
+                        let _ = console_sender
+                            .send(AppEvent::Command(Err(format!("USB input error: {error}"))));
+                        break;
                     }
                 }
             }
         })
         .context("starting USB command thread")?;
-    Ok((sender, receiver))
+    Ok(())
+}
+
+unsafe extern "C" {
+    fn usb_serial_jtag_vfs_use_driver();
 }
 
 pub fn help_text() -> &'static str {

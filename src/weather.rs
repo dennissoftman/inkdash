@@ -1,16 +1,16 @@
-use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
+use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::thread;
-use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs};
 use serde::Deserialize;
 
+use crate::events::{AppEvent, EventSender};
 use crate::location::{get_json, IpLocationProvider, Location, LocationStore};
 
 const NVS_NAMESPACE: &str = "dashboard";
-const REFRESH_INTERVAL: Duration = Duration::from_secs(20 * 60);
-const FAILURE_RETRY_INTERVAL: Duration = Duration::from_secs(5 * 60);
+pub const REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+pub const FAILURE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Weather {
@@ -157,20 +157,17 @@ fn checked_temperature(value: f64, label: &str) -> Result<f32> {
     Ok(value as f32)
 }
 
-type WorkerUpdate = Result<Weather, String>;
+pub type WorkerUpdate = Result<Weather, String>;
 
 pub struct WeatherService {
     requests: SyncSender<()>,
-    updates: Receiver<WorkerUpdate>,
     latest: Option<Weather>,
-    next_refresh: Instant,
     in_flight: bool,
 }
 
 impl WeatherService {
-    pub fn start(nvs_partition: EspDefaultNvsPartition) -> Result<Self> {
+    pub fn start(nvs_partition: EspDefaultNvsPartition, events: EventSender) -> Result<Self> {
         let (request_sender, request_receiver) = mpsc::sync_channel(1);
-        let (update_sender, update_receiver) = mpsc::sync_channel(1);
         thread::Builder::new()
             .name("weather".into())
             .stack_size(12 * 1024)
@@ -178,7 +175,9 @@ impl WeatherService {
                 let storage = match EspNvs::new(nvs_partition, NVS_NAMESPACE, true) {
                     Ok(storage) => storage,
                     Err(error) => {
-                        let _ = update_sender.send(Err(format!("opening location NVS: {error}")));
+                        let _ = events.send(AppEvent::WeatherCompleted(Err(format!(
+                            "opening location NVS: {error}"
+                        ))));
                         return;
                     }
                 };
@@ -189,7 +188,7 @@ impl WeatherService {
                         .get_location(&mut provider)
                         .and_then(|location| fetch_weather(&location))
                         .map_err(|error| format!("{error:#}"));
-                    if update_sender.send(update).is_err() {
+                    if events.send(AppEvent::WeatherCompleted(update)).is_err() {
                         break;
                     }
                 }
@@ -198,53 +197,44 @@ impl WeatherService {
 
         Ok(Self {
             requests: request_sender,
-            updates: update_receiver,
             latest: None,
-            next_refresh: Instant::now(),
             in_flight: false,
         })
     }
 
-    /// Schedule due network work and consume completed updates without blocking.
-    pub fn poll(&mut self, wifi_connected: bool) -> bool {
-        let mut changed = false;
-        loop {
-            match self.updates.try_recv() {
-                Ok(Ok(weather)) => {
-                    changed |= self.latest != Some(weather);
-                    self.latest = Some(weather);
-                    self.in_flight = false;
-                    self.next_refresh = Instant::now() + REFRESH_INTERVAL;
-                    log::info!(
-                        "Weather updated: {:.1} C, code {}, low {:.1} C, high {:.1} C",
-                        weather.temperature_c,
-                        weather.weather_code,
-                        weather.today.minimum_temperature_c,
-                        weather.today.maximum_temperature_c
-                    );
-                }
-                Ok(Err(error)) => {
-                    self.in_flight = false;
-                    self.next_refresh = Instant::now() + FAILURE_RETRY_INTERVAL;
-                    log::warn!("Weather update failed; retaining last data: {error}");
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    self.in_flight = false;
-                    break;
-                }
-            }
+    pub fn request(&mut self) -> bool {
+        if self.in_flight {
+            return true;
         }
+        match self.requests.try_send(()) {
+            Ok(()) | Err(TrySendError::Full(())) => {
+                self.in_flight = true;
+                true
+            }
+            Err(TrySendError::Disconnected(())) => false,
+        }
+    }
 
-        if wifi_connected && !self.in_flight && Instant::now() >= self.next_refresh {
-            match self.requests.try_send(()) {
-                Ok(()) | Err(TrySendError::Full(())) => self.in_flight = true,
-                Err(TrySendError::Disconnected(())) => {
-                    self.next_refresh = Instant::now() + FAILURE_RETRY_INTERVAL;
-                }
+    pub fn complete(&mut self, update: WorkerUpdate) -> bool {
+        self.in_flight = false;
+        match update {
+            Ok(weather) => {
+                let changed = self.latest != Some(weather);
+                self.latest = Some(weather);
+                log::info!(
+                    "Weather updated: {:.1} C, code {}, low {:.1} C, high {:.1} C",
+                    weather.temperature_c,
+                    weather.weather_code,
+                    weather.today.minimum_temperature_c,
+                    weather.today.maximum_temperature_c
+                );
+                changed
+            }
+            Err(error) => {
+                log::warn!("Weather update failed; retaining last data: {error}");
+                false
             }
         }
-        changed
     }
 
     pub fn latest(&self) -> Option<Weather> {

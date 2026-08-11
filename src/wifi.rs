@@ -4,12 +4,10 @@ use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::nvs::{EspDefaultNvs, EspDefaultNvsPartition, EspNvs};
 use esp_idf_svc::sys::{self, EspError};
 use esp_idf_svc::wifi::{AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi};
-use std::time::{Duration, Instant};
 
 const NVS_NAMESPACE: &str = "dashboard";
 const SSID_KEY: &str = "wifi_ssid";
 const PASSWORD_KEY: &str = "wifi_pass";
-const RECONNECT_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone, Debug)]
 pub struct WifiCredentials {
@@ -36,9 +34,6 @@ pub struct WifiNetwork {
 pub struct WifiManager {
     wifi: BlockingWifi<EspWifi<'static>>,
     storage: EspDefaultNvs,
-    last_connected: bool,
-    last_signal_bars: u8,
-    next_reconnect: Instant,
 }
 
 impl WifiManager {
@@ -53,13 +48,7 @@ impl WifiManager {
             EspWifi::new(modem, system_loop.clone(), Some(nvs_partition))?,
             system_loop,
         )?;
-        Ok(Self {
-            wifi,
-            storage,
-            last_connected: false,
-            last_signal_bars: 0,
-            next_reconnect: Instant::now(),
-        })
+        Ok(Self { wifi, storage })
     }
 
     pub fn connect_saved(&mut self) -> Result<bool> {
@@ -89,44 +78,22 @@ impl WifiManager {
         }
         self.storage.remove(SSID_KEY)?;
         self.storage.remove(PASSWORD_KEY)?;
-        self.last_connected = false;
-        self.last_signal_bars = 0;
-        self.next_reconnect = Instant::now() + RECONNECT_INTERVAL;
         Ok(())
     }
 
-    /// Observe link changes and periodically request a non-blocking reconnect.
-    /// Calling this once per minute adds no meaningful idle wake-up cost because
-    /// the dashboard already wakes at RTC minute boundaries.
-    pub fn poll(&mut self) -> Result<bool> {
-        let connected = self.wifi.is_connected().unwrap_or(false);
-        let signal_dbm = self.signal_dbm(connected);
-        let signal_bars = wifi_signal_bars(connected, signal_dbm);
-        let changed = connected != self.last_connected || signal_bars != self.last_signal_bars;
-        let now = Instant::now();
-
-        if connected {
-            self.last_connected = true;
-            self.last_signal_bars = signal_bars;
-            self.next_reconnect = now + RECONNECT_INTERVAL;
-            return Ok(changed);
+    pub fn reconnect_saved(&mut self) -> Result<bool> {
+        if self.wifi.is_connected().unwrap_or(false) || self.load()?.is_none() {
+            return Ok(false);
         }
-
-        if self.last_connected {
-            self.next_reconnect = now;
+        if !self.wifi.is_started().unwrap_or(false) {
+            self.wifi.start().context("starting Wi-Fi reconnect")?;
         }
-        self.last_connected = false;
-        self.last_signal_bars = 0;
-
-        if now >= self.next_reconnect && self.load()?.is_some() {
-            self.next_reconnect = now + RECONNECT_INTERVAL;
-            self.wifi
-                .wifi_mut()
-                .connect()
-                .context("requesting background Wi-Fi reconnect")?;
-            log::info!("Requested background Wi-Fi reconnect");
-        }
-        Ok(changed)
+        self.wifi
+            .wifi_mut()
+            .connect()
+            .context("requesting background Wi-Fi reconnect")?;
+        log::info!("Requested background Wi-Fi reconnect");
+        Ok(true)
     }
 
     pub fn status(&self) -> Result<WifiStatus> {
@@ -211,20 +178,14 @@ impl WifiManager {
         }
         EspError::convert(unsafe { sys::esp_wifi_set_ps(sys::wifi_ps_type_t_WIFI_PS_MAX_MODEM) })
             .context("enabling Wi-Fi maximum modem power saving")?;
-        let result = self
-            .wifi
+        self.wifi
             .connect()
             .context("connecting to Wi-Fi")
             .and_then(|()| {
                 self.wifi
                     .wait_netif_up()
                     .context("waiting for a Wi-Fi address")
-            });
-        self.last_connected = self.wifi.is_connected().unwrap_or(false);
-        self.last_signal_bars =
-            wifi_signal_bars(self.last_connected, self.signal_dbm(self.last_connected));
-        self.next_reconnect = Instant::now() + RECONNECT_INTERVAL;
-        result
+            })
     }
 
     fn signal_dbm(&self, connected: bool) -> Option<i8> {

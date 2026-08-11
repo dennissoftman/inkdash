@@ -1,80 +1,51 @@
 use std::thread;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
+use esp_idf_hal::delay::FreeRtos;
 use esp_idf_hal::gpio::{Gpio0, Gpio18, Input, PinDriver, Pull};
+use esp_idf_hal::task::block_on;
 
-use crate::commands::{Command, CommandSender};
+use crate::commands::Command;
+use crate::events::{AppEvent, EventSender};
 
-const POLL_INTERVAL: Duration = Duration::from_millis(10);
-const DEBOUNCE_SAMPLES: u8 = 3;
+const DEBOUNCE_MS: u32 = 30;
 
 pub fn start(
     boot_pin: Gpio0<'static>,
     power_pin: Gpio18<'static>,
-    sender: CommandSender,
+    sender: EventSender,
 ) -> Result<()> {
     let boot = PinDriver::input(boot_pin, Pull::Up)?;
     let power = PinDriver::input(power_pin, Pull::Up)?;
+    let power_sender = sender.clone();
     thread::Builder::new()
-        .name("buttons".into())
-        .stack_size(3072)
-        .spawn(move || button_loop(boot, power, sender))
-        .context("starting button input thread")?;
+        .name("button-boot".into())
+        .stack_size(2048)
+        .spawn(move || button_loop(boot, Command::NextScreen, sender))
+        .context("starting BOOT interrupt task")?;
+    thread::Builder::new()
+        .name("button-power".into())
+        .stack_size(2048)
+        .spawn(move || button_loop(power, Command::PreviousScreen, power_sender))
+        .context("starting PWR interrupt task")?;
     Ok(())
 }
 
-fn button_loop(
-    boot: PinDriver<'static, Input>,
-    power: PinDriver<'static, Input>,
-    sender: CommandSender,
-) {
-    let mut boot_state = DebouncedButton::new(boot.is_low());
-    let mut power_state = DebouncedButton::new(power.is_low());
+fn button_loop(mut pin: PinDriver<'static, Input>, command: Command, sender: EventSender) {
     loop {
-        if boot_state.update(boot.is_low()) {
-            let _ = sender.try_send(Ok(Command::NextScreen));
+        if let Err(error) = block_on(pin.wait_for_falling_edge()) {
+            log::error!("Button interrupt failed: {error}");
+            return;
         }
-        if power_state.update(power.is_low()) {
-            let _ = sender.try_send(Ok(Command::PreviousScreen));
+        // A one-shot settle delay is only armed after a GPIO edge. It consumes
+        // no CPU between presses and avoids turning switch bounce into events.
+        FreeRtos::delay_ms(DEBOUNCE_MS);
+        if pin.is_low() && sender.send(AppEvent::Command(Ok(command.clone()))).is_err() {
+            return;
         }
-        thread::sleep(POLL_INTERVAL);
-    }
-}
-
-struct DebouncedButton {
-    stable_pressed: bool,
-    candidate_pressed: bool,
-    candidate_samples: u8,
-}
-
-impl DebouncedButton {
-    const fn new(pressed: bool) -> Self {
-        Self {
-            stable_pressed: pressed,
-            candidate_pressed: pressed,
-            candidate_samples: 0,
+        if pin.is_low() && block_on(pin.wait_for_rising_edge()).is_err() {
+            return;
         }
-    }
-
-    /// Returns true once for each debounced press. Releases are consumed only
-    /// to re-arm the next press.
-    fn update(&mut self, pressed: bool) -> bool {
-        if pressed != self.candidate_pressed {
-            self.candidate_pressed = pressed;
-            self.candidate_samples = 1;
-            return false;
-        }
-        if pressed == self.stable_pressed {
-            self.candidate_samples = 0;
-            return false;
-        }
-        self.candidate_samples = self.candidate_samples.saturating_add(1);
-        if self.candidate_samples < DEBOUNCE_SAMPLES {
-            return false;
-        }
-        self.stable_pressed = pressed;
-        self.candidate_samples = 0;
-        pressed
+        FreeRtos::delay_ms(DEBOUNCE_MS);
     }
 }

@@ -1,9 +1,14 @@
-use std::time::{Duration, Instant};
+use std::future::{poll_fn, Future};
+use std::task::Poll;
+use std::time::Duration;
 
 use anyhow::{bail, Result};
+use embedded_graphics::primitives::Rectangle;
 use esp_idf_hal::delay::FreeRtos;
 use esp_idf_hal::gpio::{Input, Output, PinDriver};
 use esp_idf_hal::spi::SpiSingleDeviceDriver;
+use esp_idf_hal::task::block_on;
+use esp_idf_svc::timer::EspTaskTimerService;
 
 pub const WIDTH: usize = 200;
 pub const HEIGHT: usize = 200;
@@ -120,10 +125,37 @@ impl<'d> Epaper<'d> {
         self.wait_until_idle(Duration::from_secs(5))
     }
 
-    pub fn display_partial(&mut self, framebuffer: &[u8]) -> Result<()> {
+    pub fn display_partial_windows(
+        &mut self,
+        framebuffer: &[u8],
+        regions: &[Rectangle],
+    ) -> Result<()> {
         validate_framebuffer(framebuffer)?;
-        self.command(0x24)?;
-        self.data(framebuffer)?;
+        for &region in regions {
+            let (x_start, x_end, y_start, y_end) = validate_region(region)?;
+            self.command(0x44)?;
+            self.data(&[x_start as u8, x_end as u8])?;
+            self.command(0x45)?;
+            self.data(&[
+                y_start as u8,
+                (y_start >> 8) as u8,
+                y_end as u8,
+                (y_end >> 8) as u8,
+            ])?;
+            self.command(0x4e)?;
+            self.data(&[x_start as u8])?;
+            self.command(0x4f)?;
+            self.data(&[y_start as u8, (y_start >> 8) as u8])?;
+
+            self.command(0x24)?;
+            let row_bytes = WIDTH / 8;
+            for y in region.top_left.y as usize
+                ..(region.top_left.y as usize + region.size.height as usize)
+            {
+                let start = y * row_bytes + x_start;
+                self.data(&framebuffer[start..=y * row_bytes + x_end])?;
+            }
+        }
         self.command(0x22)?;
         self.data(&[0xcf])?;
         self.command(0x20)?;
@@ -152,13 +184,26 @@ impl<'d> Epaper<'d> {
         Ok(())
     }
 
-    fn wait_until_idle(&self, timeout: Duration) -> Result<()> {
-        let started = Instant::now();
-        while self.busy.is_high() {
-            if started.elapsed() >= timeout {
-                bail!("timed out waiting for the e-paper BUSY signal");
-            }
-            FreeRtos::delay_ms(5);
+    fn wait_until_idle(&mut self, timeout: Duration) -> Result<()> {
+        let timer_service = EspTaskTimerService::new()?;
+        let mut timer = timer_service.timer_async()?;
+        let ready = block_on(async {
+            let mut busy = core::pin::pin!(self.busy.wait_for_low());
+            let mut deadline = core::pin::pin!(timer.after(timeout));
+            poll_fn(|context| {
+                if let Poll::Ready(result) = busy.as_mut().poll(context) {
+                    return Poll::Ready(result.map(|()| true));
+                }
+                if let Poll::Ready(result) = deadline.as_mut().poll(context) {
+                    return Poll::Ready(result.map(|()| false));
+                }
+                Poll::Pending
+            })
+            .await
+        })?;
+        if !ready {
+            self.busy.disable_interrupt()?;
+            bail!("timed out waiting for the e-paper BUSY signal");
         }
         Ok(())
     }
@@ -191,4 +236,26 @@ fn validate_framebuffer(framebuffer: &[u8]) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn validate_region(region: Rectangle) -> Result<(usize, usize, usize, usize)> {
+    if region.size.width == 0
+        || region.size.height == 0
+        || region.top_left.x < 0
+        || region.top_left.y < 0
+        || region.top_left.x as usize + region.size.width as usize > WIDTH
+        || region.top_left.y as usize + region.size.height as usize > HEIGHT
+    {
+        bail!("partial update region {region:?} is outside the panel");
+    }
+    if region.top_left.x % 8 != 0 {
+        bail!("partial update x coordinate must be byte aligned");
+    }
+
+    let x_start = region.top_left.x as usize / 8;
+    let x_end = (region.top_left.x as usize + region.size.width as usize - 1) / 8;
+    let top = region.top_left.y as usize;
+    let bottom = top + region.size.height as usize - 1;
+    // RAM Y decreases while framebuffer rows increase from visual top to bottom.
+    Ok((x_start, x_end, HEIGHT - 1 - top, HEIGHT - 1 - bottom))
 }

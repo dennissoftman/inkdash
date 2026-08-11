@@ -16,9 +16,10 @@ The dashboard currently shows:
 - a five-level battery icon at the top right, with a lightning bolt on its left
   while attached to a USB host.
 
-The first render and every 30th subsequent update use a full e-paper refresh.
-Other minute changes use the board's partial-refresh waveform to reduce flashing
-and ghosting.
+The first render and every 30th visual update use a full e-paper refresh. Between
+them, ink-stacks reconciles a candidate framebuffer against the pixels already
+committed to the panel. Only changed, byte-aligned rectangles are written to
+panel RAM before a partial refresh, reducing SPI traffic, flashing, and ghosting.
 
 The dashboard has three pages. Press **BOOT** to move forward and **PWR** to move
 backward:
@@ -27,9 +28,22 @@ backward:
 2. Today: current conditions plus humidity, low, high, and rain probability.
 3. Forecast: side-by-side today and tomorrow conditions, lows, highs, and rain.
 
-Both buttons are active-low and software-debounced. Holding BOOT while resetting
-still invokes the ESP32-S3 ROM download behavior, so normal navigation uses short
-presses after startup.
+The display code uses a small in-project layout layer called **ink-stacks**.
+Every widget draws relative to the rectangle assigned by a horizontal or
+vertical stack; children can have a fixed pixel length or share the remaining
+space by weight. The current compositions intentionally preserve the original
+200 x 200 design, while the framebuffer and stack bounds already accept runtime
+dimensions for a future panel-specific layout.
+
+Rendering follows a React-like state model: asynchronous producers emit events,
+the application reduces a batch into dashboard state, widgets render a candidate
+view, and framebuffer reconciliation decides whether any panel work is needed.
+Widget properties may change without causing a refresh when their pixels remain
+identical.
+
+Both buttons are active-low, interrupt-driven, and software-debounced after an
+edge. Holding BOOT while resetting still invokes the ESP32-S3 ROM download
+behavior, so normal navigation uses short presses after startup.
 
 ## USB command console
 
@@ -140,6 +154,7 @@ console and automatically returning to ordinary commands after playback.
 | `src/board.rs` | board peripheral power-rail control |
 | `src/buttons.rs` | debounced BOOT/PWR page navigation |
 | `src/commands.rs` | USB command parsing and input thread |
+| `src/events.rs` | central application event types and blocking queue |
 | `src/datetime.rs` | validated date/time representation and parsing |
 | `src/rtc.rs` | PCF85063 BCD register protocol |
 | `src/shtc3.rs` | SHTC3 measurement, CRC, sleep/wake handling |
@@ -148,8 +163,10 @@ console and automatically returning to ordinary commands after playback.
 | `src/wifi.rs` | station-mode connection and NVS credential storage |
 | `src/location.rs` | cached coordinates and pluggable IP geolocation provider |
 | `src/weather.rs` | background Open-Meteo fetch and refresh scheduling |
-| `src/dashboard.rs` | display layout, text, badges, and framebuffer |
-| `src/epaper.rs` | SPI panel driver and full/partial waveforms |
+| `src/ink_stacks.rs` | 1-bit framebuffer plus fixed/fill row and column layout |
+| `src/dashboard.rs` | dashboard state, page selection, and render entry point |
+| `src/dashboard/widgets.rs` | composable status, clock, climate, and weather widgets |
+| `src/epaper.rs` | SPI panel driver, dirty-window writes, and refresh waveforms |
 | `src/i2c_bus.rs` | ESP-IDF 5 current master-bus API used by onboard sensors |
 | `src/power.rs` | CPU dynamic-frequency and always-responsive USB policy |
 | `espflash.toml` | 8 MB flash size and custom partition-table selection |
@@ -157,18 +174,24 @@ console and automatically returning to ordinary commands after playback.
 
 ## Power behavior
 
-The main loop blocks on its combined USB/button input channel between minute
-boundaries. A small input task samples the two switches every 10 ms for
-debouncing. The RTC is read at the next minute boundary, the SHTC3 returns to
-sleep after every measurement, and I2S plus the speaker amplifier are enabled
-only during playback. CPU dynamic-frequency scaling uses 40 MHz while idle and
-up to 160 MHz when ESP-IDF peripheral locks require it.
+The main task blocks indefinitely on one event queue; it has no idle cadence.
+GPIO interrupts wake the button tasks, the USB Serial/JTAG driver blocks on its
+receive interrupt, and one-shot ESP timers emit clock, weather, and reconnect
+events. Since the RTC interrupt output is not wired to the ESP32-S3, the next
+minute boundary is scheduled once from the RTC seconds value instead of sampled
+repeatedly. The e-paper BUSY pin is also awaited by interrupt, raced against a
+one-shot timeout. The SHTC3 returns to sleep after every event-triggered
+measurement, and I2S plus the speaker amplifier are enabled only during
+playback. CPU dynamic-frequency scaling uses 40 MHz while idle and up to 160 MHz
+when ESP-IDF peripheral locks require it.
 Connected Wi-Fi uses maximum modem power saving while preserving the station
 connection. If a saved network is unavailable, a non-blocking reconnect is
-requested every five minutes; link state and RSSI are checked alongside the RTC
-minute poll, and the badge refreshes only when its connection or bar tier
-changes. Automatic light sleep is intentionally disabled because it would
-make the native USB Serial/JTAG command interface intermittently unavailable.
+requested by a one-shot event after five minutes. ESP-IDF Wi-Fi/IP events update
+link state immediately; signal strength and the remaining sensor state are
+sampled on minute events. Pixel reconciliation suppresses the badge refresh
+unless its rendered appearance changes. Automatic light sleep is intentionally
+disabled because it would make the native USB Serial/JTAG command interface
+intermittently unavailable.
 
 The SHTC3 temperature applies Waveshare's documented `-4 C` board/enclosure
 compensation. Battery percentage is an estimate from voltage because this board

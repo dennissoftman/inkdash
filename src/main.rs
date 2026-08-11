@@ -6,7 +6,9 @@ mod commands;
 mod dashboard;
 mod datetime;
 mod epaper;
+mod events;
 mod i2c_bus;
+mod ink_stacks;
 mod location;
 mod power;
 mod rtc;
@@ -15,17 +17,17 @@ mod weather;
 mod wifi;
 
 use std::borrow::Borrow;
-use std::sync::mpsc::RecvTimeoutError;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use audio::Audio;
 use battery::{Battery, BatteryStatus};
 use board::BoardPower;
 use commands::Command;
-use dashboard::{DashboardData, DashboardScreen, Framebuffer};
-use epaper::{Epaper, FRAMEBUFFER_SIZE};
+use dashboard::{DashboardData, DashboardScreen};
+use embedded_graphics::geometry::Size;
+use epaper::{Epaper, FRAMEBUFFER_SIZE, HEIGHT, WIDTH};
 use esp_idf_hal::adc::oneshot::config::{AdcChannelConfig, Calibration};
 use esp_idf_hal::adc::oneshot::{AdcChannelDriver, AdcDriver};
 use esp_idf_hal::adc::{attenuation, AdcChannel};
@@ -36,14 +38,20 @@ use esp_idf_hal::spi::{config, Dma, SpiDeviceDriver, SpiDriverConfig};
 use esp_idf_hal::units::FromValueType;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::log::EspLogger;
+use esp_idf_svc::netif::IpEvent;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
+use esp_idf_svc::timer::{EspTaskTimerService, EspTimer};
+use esp_idf_svc::wifi::WifiEvent;
+use events::AppEvent;
 use i2c_bus::I2cBus;
+use ink_stacks::Framebuffer;
 use rtc::Rtc;
 use shtc3::Shtc3;
-use weather::WeatherService;
+use weather::{WeatherService, FAILURE_RETRY_INTERVAL, REFRESH_INTERVAL};
 use wifi::{WifiCredentials, WifiManager};
 
 const FULL_REFRESH_AFTER_PARTIALS: u8 = 30;
+const RECONNECT_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 fn main() -> Result<()> {
     esp_idf_svc::sys::link_patches();
@@ -123,7 +131,41 @@ fn main() -> Result<()> {
 
     let system_loop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
-    let mut weather = WeatherService::start(nvs.clone())?;
+    let (event_sender, events) = events::channel();
+
+    let wifi_sender = event_sender.clone();
+    let _wifi_subscription = system_loop.subscribe::<WifiEvent, _>(move |event| {
+        if matches!(
+            event,
+            WifiEvent::StaStarted
+                | WifiEvent::StaStopped
+                | WifiEvent::StaConnected(_)
+                | WifiEvent::StaDisconnected(_)
+                | WifiEvent::StaBssRssiLow
+        ) {
+            let _ = wifi_sender.send(AppEvent::WifiChanged);
+        }
+    })?;
+    let ip_sender = event_sender.clone();
+    let _ip_subscription = system_loop.subscribe::<IpEvent, _>(move |_| {
+        let _ = ip_sender.send(AppEvent::WifiChanged);
+    })?;
+
+    let timer_service = EspTaskTimerService::new()?;
+    let clock_sender = event_sender.clone();
+    let clock_timer = timer_service.timer(move || {
+        let _ = clock_sender.send(AppEvent::ClockDue);
+    })?;
+    let weather_sender = event_sender.clone();
+    let weather_timer = timer_service.timer(move || {
+        let _ = weather_sender.send(AppEvent::WeatherDue);
+    })?;
+    let reconnect_sender = event_sender.clone();
+    let reconnect_timer = timer_service.timer(move || {
+        let _ = reconnect_sender.send(AppEvent::ReconnectDue);
+    })?;
+
+    let mut weather = WeatherService::start(nvs.clone(), event_sender.clone())?;
     let mut wifi = WifiManager::new(peripherals.modem, system_loop, nvs)?;
     match wifi.connect_saved() {
         Ok(true) => log::info!("Connected using saved Wi-Fi credentials"),
@@ -131,89 +173,60 @@ fn main() -> Result<()> {
         Err(error) => log::warn!("Saved Wi-Fi connection failed: {error:#}"),
     }
 
-    let (command_sender, commands) = commands::start_usb_console()?;
-    buttons::start(pins.gpio0, pins.gpio18, command_sender)?;
+    commands::start_usb_console(event_sender.clone())?;
+    buttons::start(pins.gpio0, pins.gpio18, event_sender)?;
     println!("READY Rust e-paper dashboard");
     println!("{}", commands::help_text());
 
-    let mut framebuffer = Framebuffer::new();
+    let display_size = Size::new(WIDTH as u32, HEIGHT as u32);
+    let mut displayed_frame = Framebuffer::new(display_size);
+    let mut next_frame = Framebuffer::new(display_size);
     let mut panel_initialized = false;
     let mut partial_refreshes = 0_u8;
-    let mut force_refresh = true;
+    let mut render_requested = true;
     let mut force_full_refresh = false;
-    let mut last_minute = None;
-    let mut next_clock_poll = Instant::now();
-    let mut next_wifi_poll = Instant::now();
-    let mut usb_powered = power::usb_host_connected();
     let mut screen = DashboardScreen::Home;
+    let mut data = collect_dashboard_data(
+        &rtc,
+        &climate_sensor,
+        &mut i2c,
+        &mut battery,
+        &wifi,
+        weather.latest(),
+        power::usb_host_connected(),
+    );
+    schedule_clock(&clock_timer, data.time)?;
+    weather_timer.after(Duration::from_millis(1))?;
 
     loop {
-        let current_usb_powered = power::usb_host_connected();
-        if current_usb_powered != usb_powered {
-            usb_powered = current_usb_powered;
-            force_refresh = true;
-        }
-
-        if Instant::now() >= next_clock_poll {
-            match rtc.read(&mut i2c) {
-                Ok(now) => {
-                    let minute = (now.year, now.month, now.day, now.hour, now.minute);
-                    if last_minute != Some(minute) {
-                        last_minute = Some(minute);
-                        force_refresh = true;
-                    }
-                    // Re-read just after the next RTC minute boundary instead
-                    // of waking the CPU and I2C bus once per second.
-                    next_clock_poll =
-                        Instant::now() + Duration::from_secs(u64::from(60_u8 - now.second));
-                }
-                Err(error) => {
-                    log::warn!("RTC polling failed: {error:#}");
-                    next_clock_poll = Instant::now() + Duration::from_secs(5);
-                }
-            }
-        }
-
-        if Instant::now() >= next_wifi_poll {
-            match wifi.poll() {
-                Ok(changed) => force_refresh |= changed,
-                Err(error) => log::warn!("Wi-Fi polling failed: {error:#}"),
-            }
-            // Share the RTC deadline instead of waking the CPU separately for
-            // link observation. RTC failures already have a bounded retry.
-            next_wifi_poll = next_clock_poll;
-        }
-
-        force_refresh |= weather.poll(wifi.is_connected());
-
-        // E-paper refreshes take seconds. Keep consuming the bounded USB/PCM
-        // queue until the stream ends so the host never stalls behind a redraw.
-        if force_refresh && !audio.is_pcm_active() {
-            let data = collect_dashboard_data(
-                &rtc,
-                &climate_sensor,
-                &mut i2c,
-                &mut battery,
-                &wifi,
-                weather.latest(),
-                usb_powered,
-            );
-            dashboard::render(&mut framebuffer, &data, screen);
-
+        if render_requested && !audio.is_pcm_active() {
+            dashboard::render(&mut next_frame, &data, screen);
+            let changed = displayed_frame.changed_regions(&next_frame);
             let needs_full = force_full_refresh
                 || !panel_initialized
                 || partial_refreshes >= FULL_REFRESH_AFTER_PARTIALS;
-            let refresh_result = if needs_full {
-                epaper
+            let refresh_result = match (needs_full, changed.as_slice()) {
+                (true, _) => epaper
                     .init_full()
-                    .and_then(|()| epaper.display_base(framebuffer.bytes()))
-                    .and_then(|()| epaper.init_partial())
-            } else {
-                epaper.display_partial(framebuffer.bytes())
+                    .and_then(|()| epaper.display_base(next_frame.bytes()))
+                    .and_then(|()| epaper.init_partial()),
+                (false, regions @ [_, ..]) => {
+                    log::info!(
+                        "Visual diff: updating {} region(s): {regions:?}",
+                        regions.len()
+                    );
+                    epaper.display_partial_windows(next_frame.bytes(), regions)
+                }
+                (false, []) => {
+                    log::debug!("Render reconciled with no visual changes");
+                    render_requested = false;
+                    continue;
+                }
             };
 
             match refresh_result {
                 Ok(()) => {
+                    std::mem::swap(&mut displayed_frame, &mut next_frame);
                     panel_initialized = true;
                     partial_refreshes = if needs_full { 0 } else { partial_refreshes + 1 };
                     force_full_refresh = false;
@@ -249,42 +262,161 @@ fn main() -> Result<()> {
                 }
                 Err(error) => log::error!("Dashboard refresh failed: {error:#}"),
             }
-            force_refresh = false;
+            render_requested = false;
         }
 
-        // Block until either USB work arrives or the RTC needs attention.
-        // The channel wakes immediately for commands and PCM chunks, while an
-        // idle dashboard now has no periodic 10 Hz application wake-up.
-        let next_poll = next_clock_poll.min(next_wifi_poll);
-        let wait = next_poll.saturating_duration_since(Instant::now());
-        match commands.recv_timeout(wait) {
-            Ok(Ok(command)) => {
-                let clock_changed = matches!(&command, Command::TimeSet(_));
-                match command {
-                    Command::NextScreen => {
-                        screen = screen.next();
-                        force_refresh = true;
+        // The application has no idle cadence: it sleeps here until a producer
+        // emits an event, then drains the already-queued burst before rendering.
+        let first_event = events
+            .recv()
+            .map_err(|_| anyhow::anyhow!("all application event producers stopped"))?;
+        let mut pending = Some(first_event);
+        loop {
+            let event = match pending.take() {
+                Some(event) => event,
+                None => match events.try_recv() {
+                    Ok(event) => event,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                },
+            };
+            match event {
+                AppEvent::Command(Ok(command)) => {
+                    let clock_changed = matches!(&command, Command::TimeSet(_));
+                    let explicit_refresh = matches!(&command, Command::Refresh);
+                    match command {
+                        Command::NextScreen => {
+                            screen = screen.next();
+                            render_requested = true;
+                            force_full_refresh = true;
+                        }
+                        Command::PreviousScreen => {
+                            screen = screen.previous();
+                            render_requested = true;
+                            force_full_refresh = true;
+                        }
+                        command => {
+                            if handle_command(command, &rtc, &mut i2c, &mut wifi, &mut audio) {
+                                refresh_dashboard_data(
+                                    &mut data,
+                                    &rtc,
+                                    &climate_sensor,
+                                    &mut i2c,
+                                    &mut battery,
+                                    &wifi,
+                                    weather.latest(),
+                                );
+                                render_requested = true;
+                            }
+                        }
+                    }
+                    if explicit_refresh {
                         force_full_refresh = true;
                     }
-                    Command::PreviousScreen => {
-                        screen = screen.previous();
-                        force_refresh = true;
-                        force_full_refresh = true;
-                    }
-                    command => {
-                        force_refresh |=
-                            handle_command(command, &rtc, &mut i2c, &mut wifi, &mut audio);
+                    if clock_changed {
+                        schedule_clock(&clock_timer, data.time)?;
                     }
                 }
-                if clock_changed {
-                    next_clock_poll = Instant::now();
+                AppEvent::Command(Err(error)) => println!("ERR {error}"),
+                AppEvent::ClockDue => {
+                    refresh_dashboard_data(
+                        &mut data,
+                        &rtc,
+                        &climate_sensor,
+                        &mut i2c,
+                        &mut battery,
+                        &wifi,
+                        weather.latest(),
+                    );
+                    schedule_clock(&clock_timer, data.time)?;
+                    render_requested = true;
                 }
+                AppEvent::WeatherDue => {
+                    if wifi.is_connected() && weather.request() {
+                        log::debug!("Weather refresh dispatched");
+                    } else {
+                        weather_timer.after(FAILURE_RETRY_INTERVAL)?;
+                    }
+                }
+                AppEvent::WeatherCompleted(update) => {
+                    let succeeded = update.is_ok();
+                    if weather.complete(update) {
+                        data.weather = weather.latest();
+                        render_requested = true;
+                    }
+                    weather_timer.after(if succeeded {
+                        REFRESH_INTERVAL
+                    } else {
+                        FAILURE_RETRY_INTERVAL
+                    })?;
+                }
+                AppEvent::WifiChanged => {
+                    let was_connected = data.wifi_connected;
+                    update_wifi_data(&mut data, &wifi);
+                    render_requested = true;
+                    if wifi.is_connected() {
+                        reconnect_timer.cancel()?;
+                        if !was_connected {
+                            weather_timer.after(Duration::from_millis(1))?;
+                        }
+                    } else {
+                        reconnect_timer.after(RECONNECT_INTERVAL)?;
+                    }
+                }
+                AppEvent::ReconnectDue => match wifi.reconnect_saved() {
+                    Ok(true) => reconnect_timer.after(RECONNECT_INTERVAL)?,
+                    Ok(false) => {}
+                    Err(error) => {
+                        log::warn!("Wi-Fi reconnect failed: {error:#}");
+                        reconnect_timer.after(RECONNECT_INTERVAL)?;
+                    }
+                },
             }
-            Ok(Err(error)) => println!("ERR {error}"),
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => bail!("USB command task stopped"),
         }
     }
+}
+
+fn schedule_clock(timer: &EspTimer<'_>, time: Option<datetime::DateTime>) -> Result<()> {
+    let delay = time
+        .map(|value| Duration::from_secs(u64::from(60_u8 - value.second)))
+        .unwrap_or_else(|| Duration::from_secs(5));
+    timer.after(delay)?;
+    Ok(())
+}
+
+fn refresh_dashboard_data<'d, C, M>(
+    data: &mut DashboardData,
+    rtc: &Rtc,
+    climate_sensor: &Shtc3,
+    i2c: &mut I2cBus<'_>,
+    battery: &mut Battery<'d, C, M>,
+    wifi: &WifiManager,
+    weather: Option<weather::Weather>,
+) where
+    C: AdcChannel,
+    M: Borrow<AdcDriver<'d, C::AdcUnit>>,
+{
+    *data = collect_dashboard_data(
+        rtc,
+        climate_sensor,
+        i2c,
+        battery,
+        wifi,
+        weather,
+        power::usb_host_connected(),
+    );
+}
+
+fn update_wifi_data(data: &mut DashboardData, wifi: &WifiManager) {
+    let status = wifi
+        .status()
+        .inspect_err(|error| log::warn!("Wi-Fi event status failed: {error:#}"))
+        .ok();
+    data.wifi_connected = status.as_ref().is_some_and(|status| status.connected);
+    data.wifi_ssid = status
+        .as_ref()
+        .and_then(|status| status.configured_ssid.clone());
+    data.wifi_signal_dbm = status.and_then(|status| status.signal_dbm);
 }
 
 fn collect_dashboard_data<'d, C, M>(
