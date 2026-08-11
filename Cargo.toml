@@ -1,0 +1,28 @@
+[package]
+name = "esp-smart-eink"
+version = "0.1.0"
+edition = "2021"
+resolver = "2"
+rust-version = "1.82"
+
+[[bin]]
+name = "esp-smart-eink"
+harness = false
+
+[profile.dev]
+debug = true
+opt-level = "z"
+
+[profile.release]
+opt-level = "s"
+lto = true
+
+[dependencies]
+anyhow = "1"
+log = "0.4"
+esp-idf-hal = "0.46.1"
+esp-idf-svc = "0.52.1"
+embedded-graphics = "0.8.1"
+
+[build-dependencies]
+embuild = "0.33.3"

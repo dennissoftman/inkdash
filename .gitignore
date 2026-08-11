@@ -1,0 +1,10 @@
+/target/
+/.embuild/
+/sdkconfig
+/sdkconfig.old
+/dependencies.lock
+/.venv/
+__pycache__/
+
+# Factory images can contain device-specific settings or credentials.
+backups/*.bin
