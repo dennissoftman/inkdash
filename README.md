@@ -90,7 +90,7 @@ After Wi-Fi connects, the firmware determines its approximate coordinates,
 city, and country code once using `ipwho.is` and saves them in NVS. Later boots
 reuse the complete location. Firmware upgrading from the old coordinate-only
 cache refreshes the location once to add the display name.
-Open-Meteo weather is fetched on a dedicated worker thread every 20 minutes, so
+Open-Meteo weather is fetched on boot and then on a dedicated worker thread every hour, so
 HTTPS requests never block input or dashboard rendering. A failed update is
 retried after five minutes and leaves the last successful weather reading on
 screen.

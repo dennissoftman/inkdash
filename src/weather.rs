@@ -10,7 +10,7 @@ use crate::events::{AppEvent, EventSender};
 use crate::location::{get_json, IpLocationProvider, Location, LocationStore};
 
 const NVS_NAMESPACE: &str = "dashboard";
-pub const REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+pub const REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 pub const FAILURE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
