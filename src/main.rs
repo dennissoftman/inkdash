@@ -11,6 +11,7 @@ mod i2c_bus;
 mod ink_stacks;
 mod language;
 mod location;
+mod notifications;
 mod power;
 mod rtc;
 mod shtc3;
@@ -47,6 +48,7 @@ use events::AppEvent;
 use i2c_bus::I2cBus;
 use ink_stacks::Framebuffer;
 use language::{Language, LanguageStore};
+use notifications::BatteryNotificationSchedule;
 use rtc::Rtc;
 use shtc3::Shtc3;
 use weather::{WeatherService, FAILURE_RETRY_INTERVAL, REFRESH_INTERVAL};
@@ -59,7 +61,7 @@ fn main() -> Result<()> {
     esp_idf_svc::sys::link_patches();
     EspLogger::initialize_default();
     log::info!("Starting modular Rust e-paper dashboard");
-    power::configure_dynamic_frequency_scaling()?;
+    let mut power_policy = power::PowerPolicy::initialize()?;
 
     let peripherals = Peripherals::take()?;
     let pins = peripherals.pins;
@@ -178,7 +180,7 @@ fn main() -> Result<()> {
     }
 
     commands::start_usb_console(event_sender.clone())?;
-    buttons::start(pins.gpio0, pins.gpio18, event_sender)?;
+    buttons::start(pins.gpio0, pins.gpio18, event_sender.clone())?;
     println!("READY Rust e-paper dashboard");
     println!("{}", commands::help_text());
 
@@ -190,6 +192,8 @@ fn main() -> Result<()> {
     let mut render_requested = true;
     let mut force_full_refresh = false;
     let mut screen = DashboardScreen::Home;
+    // The USB SOF monitor has had time to settle during peripheral setup.
+    power_policy.refresh()?;
     let mut data = collect_dashboard_data(
         &rtc,
         &climate_sensor,
@@ -197,9 +201,10 @@ fn main() -> Result<()> {
         &mut battery,
         &wifi,
         weather.latest(),
-        power::usb_host_connected(),
     );
     data.language = language;
+    let mut battery_notifications = BatteryNotificationSchedule::new();
+    queue_battery_notification(&mut battery_notifications, &data, &event_sender);
     schedule_clock(&clock_timer, data.time)?;
     weather_timer.after(Duration::from_millis(1))?;
 
@@ -259,9 +264,11 @@ fn main() -> Result<()> {
                                 "{}% ({:.2} V, {})",
                                 value.percent,
                                 value.voltage_v,
-                                if data.battery.usb_powered { "USB" } else { "battery" }
+                                data.power_source.label()
                             ),
-                            None if data.battery.usb_powered => "not detected (USB)".into(),
+                            None if data.power_source.is_external() => {
+                                "not detected (PWR)".into()
+                            }
                             None => "not detected".into(),
                         },
                     );
@@ -286,6 +293,12 @@ fn main() -> Result<()> {
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
                 },
             };
+            if let Some(source) = power_policy.refresh()? {
+                // Invalidate only source-dependent UI state. Battery voltage
+                // keeps its normal minute sampling cadence.
+                data.power_source = source;
+                render_requested = true;
+            }
             match event {
                 AppEvent::Command(Ok(command)) => {
                     let clock_changed = matches!(&command, Command::TimeSet(_));
@@ -346,6 +359,7 @@ fn main() -> Result<()> {
                         &wifi,
                         weather.latest(),
                     );
+                    queue_battery_notification(&mut battery_notifications, &data, &event_sender);
                     schedule_clock(&clock_timer, data.time)?;
                     render_requested = true;
                 }
@@ -367,6 +381,24 @@ fn main() -> Result<()> {
                     } else {
                         FAILURE_RETRY_INTERVAL
                     })?;
+                }
+                AppEvent::Notification(notification) => {
+                    if power::source().is_external() {
+                        log::debug!(
+                            "Suppressing {} notification after external power attached",
+                            notification.name()
+                        );
+                    } else if audio.is_pcm_active() {
+                        log::warn!(
+                            "Skipping {} notification while PCM playback is active",
+                            notification.name()
+                        );
+                    } else if let Err(error) = audio.play_notification(&mut i2c, notification) {
+                        log::error!(
+                            "Playing {} notification failed: {error:#}",
+                            notification.name()
+                        );
+                    }
                 }
                 AppEvent::WifiChanged => {
                     let was_connected = data.wifi_connected;
@@ -394,6 +426,17 @@ fn main() -> Result<()> {
     }
 }
 
+fn queue_battery_notification(
+    schedule: &mut BatteryNotificationSchedule,
+    data: &DashboardData,
+    event_sender: &events::EventSender,
+) {
+    let percent = data.battery.reading.map(|reading| reading.percent);
+    if let Some(notification) = schedule.on_minute(data.time, percent, data.power_source) {
+        let _ = event_sender.send(AppEvent::Notification(notification));
+    }
+}
+
 fn schedule_clock(timer: &EspTimer<'_>, time: Option<datetime::DateTime>) -> Result<()> {
     let delay = time
         .map(|value| Duration::from_secs(u64::from(60_u8 - value.second)))
@@ -415,15 +458,7 @@ fn refresh_dashboard_data<'d, C, M>(
     M: Borrow<AdcDriver<'d, C::AdcUnit>>,
 {
     let language = data.language;
-    *data = collect_dashboard_data(
-        rtc,
-        climate_sensor,
-        i2c,
-        battery,
-        wifi,
-        weather,
-        power::usb_host_connected(),
-    );
+    *data = collect_dashboard_data(rtc, climate_sensor, i2c, battery, wifi, weather);
     data.language = language;
 }
 
@@ -446,7 +481,6 @@ fn collect_dashboard_data<'d, C, M>(
     battery: &mut Battery<'d, C, M>,
     wifi: &WifiManager,
     weather: Option<std::sync::Arc<weather::Weather>>,
-    usb_powered: bool,
 ) -> DashboardData
 where
     C: AdcChannel,
@@ -461,9 +495,9 @@ where
         .inspect_err(|error| log::warn!("Climate read failed: {error:#}"))
         .ok();
     let battery = battery
-        .read(usb_powered)
+        .read()
         .inspect_err(|error| log::warn!("Battery read failed: {error:#}"))
-        .unwrap_or_else(|_| BatteryStatus::unavailable(usb_powered));
+        .unwrap_or_else(|_| BatteryStatus::unavailable());
     let wifi_status = wifi
         .status()
         .inspect_err(|error| log::warn!("Wi-Fi status failed: {error:#}"))
@@ -476,10 +510,12 @@ where
         .as_ref()
         .and_then(|status| status.configured_ssid.clone());
     let wifi_signal_dbm = wifi_status.as_ref().and_then(|status| status.signal_dbm);
+    let power_source = power::source();
     DashboardData {
         time,
         climate,
         battery,
+        power_source,
         wifi_connected,
         wifi_ssid,
         wifi_signal_dbm,

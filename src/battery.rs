@@ -17,15 +17,11 @@ pub struct BatteryReading {
 #[derive(Clone, Copy, Debug)]
 pub struct BatteryStatus {
     pub reading: Option<BatteryReading>,
-    pub usb_powered: bool,
 }
 
 impl BatteryStatus {
-    pub const fn unavailable(usb_powered: bool) -> Self {
-        Self {
-            reading: None,
-            usb_powered,
-        }
+    pub const fn unavailable() -> Self {
+        Self { reading: None }
     }
 }
 
@@ -46,7 +42,7 @@ where
         Self { channel }
     }
 
-    pub fn read(&mut self, usb_powered: bool) -> Result<BatteryStatus> {
+    pub fn read(&mut self) -> Result<BatteryStatus> {
         let mut millivolts = 0_u32;
         const SAMPLE_COUNT: u32 = 16;
         for _ in 0..SAMPLE_COUNT {
@@ -56,7 +52,7 @@ where
 
         let voltage_v = millivolts as f32 / SAMPLE_COUNT as f32 / 1000.0 * DIVIDER_MULTIPLIER;
         if voltage_v < PRESENT_THRESHOLD_V {
-            return Ok(BatteryStatus::unavailable(usb_powered));
+            return Ok(BatteryStatus::unavailable());
         }
 
         Ok(BatteryStatus {
@@ -64,7 +60,6 @@ where
                 voltage_v,
                 percent: voltage_to_percent(voltage_v),
             }),
-            usb_powered,
         })
     }
 }

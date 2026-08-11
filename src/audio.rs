@@ -7,6 +7,7 @@ use esp_idf_hal::gpio::{Gpio46, Output, PinDriver};
 use esp_idf_svc::sys::{self, EspError};
 
 use crate::i2c_bus::I2cBus;
+use crate::notifications::Notification;
 
 const CODEC_ADDRESS: u8 = 0x18;
 const SAMPLE_RATE_HZ: u32 = 24_000;
@@ -17,6 +18,62 @@ pub const DEFAULT_DURATION_MS: u16 = 500;
 pub const DEFAULT_VOLUME_PERCENT: u8 = 45;
 
 pub const SUPPORTED_SAMPLE_RATES: [u32; 6] = [8_000, 16_000, 24_000, 32_000, 44_100, 48_000];
+
+#[derive(Clone, Copy)]
+enum ToneStep {
+    Tone { frequency_hz: u16, duration_ms: u16 },
+    Pause { duration_ms: u16 },
+}
+
+struct ToneSequence<'a> {
+    waveform: Waveform,
+    volume_percent: u8,
+    steps: &'a [ToneStep],
+}
+
+const CHARGE_SOON_STEPS: [ToneStep; 5] = [
+    ToneStep::Tone {
+        frequency_hz: 784,
+        duration_ms: 140,
+    },
+    ToneStep::Pause { duration_ms: 110 },
+    ToneStep::Tone {
+        frequency_hz: 659,
+        duration_ms: 140,
+    },
+    ToneStep::Pause { duration_ms: 110 },
+    ToneStep::Tone {
+        frequency_hz: 523,
+        duration_ms: 260,
+    },
+];
+
+const CHARGE_CRITICAL_STEPS: [ToneStep; 9] = [
+    ToneStep::Tone {
+        frequency_hz: 1_176,
+        duration_ms: 180,
+    },
+    ToneStep::Pause { duration_ms: 70 },
+    ToneStep::Tone {
+        frequency_hz: 1_176,
+        duration_ms: 180,
+    },
+    ToneStep::Pause { duration_ms: 70 },
+    ToneStep::Tone {
+        frequency_hz: 1_176,
+        duration_ms: 180,
+    },
+    ToneStep::Pause { duration_ms: 110 },
+    ToneStep::Tone {
+        frequency_hz: 784,
+        duration_ms: 260,
+    },
+    ToneStep::Pause { duration_ms: 80 },
+    ToneStep::Tone {
+        frequency_hz: 587,
+        duration_ms: 380,
+    },
+];
 
 #[derive(Clone, Copy, Debug)]
 pub enum Waveform {
@@ -78,19 +135,72 @@ impl<'d> Audio<'d> {
         volume_percent: u8,
         waveform: Waveform,
     ) -> Result<()> {
+        let steps = [ToneStep::Tone {
+            frequency_hz,
+            duration_ms,
+        }];
+        self.play_tone_sequence(
+            i2c,
+            ToneSequence {
+                waveform,
+                volume_percent,
+                steps: &steps,
+            },
+        )
+    }
+
+    pub fn play_notification(
+        &mut self,
+        i2c: &mut I2cBus<'_>,
+        notification: Notification,
+    ) -> Result<()> {
+        let sequence = match notification {
+            Notification::ChargeSoon => ToneSequence {
+                waveform: Waveform::Sine,
+                volume_percent: 50,
+                steps: &CHARGE_SOON_STEPS,
+            },
+            Notification::ChargeCritical => ToneSequence {
+                waveform: Waveform::Square,
+                volume_percent: 90,
+                steps: &CHARGE_CRITICAL_STEPS,
+            },
+        };
+        self.play_tone_sequence(i2c, sequence)
+    }
+
+    fn play_tone_sequence(
+        &mut self,
+        i2c: &mut I2cBus<'_>,
+        sequence: ToneSequence<'_>,
+    ) -> Result<()> {
         if self.pcm.is_some() {
             bail!("PCM playback is already active");
         }
         let mut driver = I2sTxChannel::new(SAMPLE_RATE_HZ).context("configuring I2S output")?;
 
         let result: Result<()> = (|| {
-            initialize_codec(i2c, SAMPLE_RATE_HZ, volume_percent)?;
+            // Waveshare's ESP-IDF codec path starts MCLK/BCLK before codec
+            // setup so every ES8311 register transition has a live clock.
             driver.enable().context("starting I2S output")?;
+            initialize_codec(i2c, SAMPLE_RATE_HZ, sequence.volume_percent)?;
             self.amplifier_enable
                 .set_high()
                 .context("enabling speaker amplifier")?;
 
-            write_tone_wave(&mut driver, waveform, frequency_hz, duration_ms)?;
+            for step in sequence.steps {
+                match *step {
+                    ToneStep::Tone {
+                        frequency_hz,
+                        duration_ms,
+                    } => {
+                        write_tone_wave(&mut driver, sequence.waveform, frequency_hz, duration_ms)?
+                    }
+                    ToneStep::Pause { duration_ms } => {
+                        write_silence(&mut driver, SAMPLE_RATE_HZ, usize::from(duration_ms))?
+                    }
+                }
+            }
             write_silence(&mut driver, SAMPLE_RATE_HZ, 20)?;
             Ok(())
         })();
@@ -120,8 +230,8 @@ impl<'d> Audio<'d> {
 
         self.pcm_error = None;
         let mut driver = I2sTxChannel::new(sample_rate_hz).context("configuring PCM I2S output")?;
-        initialize_codec(i2c, sample_rate_hz, volume_percent)?;
         driver.enable().context("starting PCM I2S output")?;
+        initialize_codec(i2c, sample_rate_hz, volume_percent)?;
         self.amplifier_enable
             .set_high()
             .context("enabling speaker amplifier")?;
@@ -347,11 +457,13 @@ impl I2sTxChannel {
                 data_bit_width: sys::i2s_data_bit_width_t_I2S_DATA_BIT_WIDTH_16BIT,
                 slot_bit_width: sys::i2s_slot_bit_width_t_I2S_SLOT_BIT_WIDTH_AUTO,
                 slot_mode: sys::i2s_slot_mode_t_I2S_SLOT_MODE_MONO,
-                slot_mask: sys::i2s_std_slot_mask_t_I2S_STD_SLOT_LEFT,
+                // These match ESP-IDF's ESP32-S3 Philips-mode defaults. In
+                // mono TX mode BOTH duplicates each sample into both slots.
+                slot_mask: sys::i2s_std_slot_mask_t_I2S_STD_SLOT_BOTH,
                 ws_width: 16,
                 ws_pol: false,
                 bit_shift: true,
-                left_align: false,
+                left_align: true,
                 big_endian: false,
                 bit_order_lsb: false,
             },

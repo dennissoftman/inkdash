@@ -6,6 +6,7 @@ use crate::battery::BatteryStatus;
 use crate::datetime::DateTime;
 use crate::ink_stacks::Framebuffer;
 use crate::language::Language;
+use crate::power::PowerSource;
 use crate::shtc3::ClimateReading;
 use crate::weather::Weather;
 
@@ -13,6 +14,7 @@ pub struct DashboardData {
     pub time: Option<DateTime>,
     pub climate: Option<ClimateReading>,
     pub battery: BatteryStatus,
+    pub power_source: PowerSource,
     pub wifi_connected: bool,
     pub wifi_ssid: Option<String>,
     pub wifi_signal_dbm: Option<i8>,

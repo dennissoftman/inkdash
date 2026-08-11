@@ -13,6 +13,7 @@ use crate::battery::{BatteryReading, BatteryStatus};
 use crate::datetime::DateTime;
 use crate::ink_stacks::{Framebuffer, Stack, StackItem, Widget};
 use crate::language::Language;
+use crate::power::PowerSource;
 use crate::shtc3::ClimateReading;
 use crate::weather::{ForecastPeriod, Weather, WeatherKind};
 use crate::wifi::wifi_signal_bars;
@@ -53,7 +54,10 @@ impl Widget for StatusBar<'_> {
             ssid: self.data.wifi_ssid.as_deref(),
             language: self.data.language,
         };
-        let battery = BatteryWidget(self.data.battery);
+        let battery = BatteryWidget {
+            battery: self.data.battery,
+            power_source: self.data.power_source,
+        };
         let children = [StackItem::fill(&wifi, 1), StackItem::fixed(&battery, 44)];
         Stack::horizontal(&children)
             .with_spacing(1)
@@ -91,11 +95,21 @@ impl Widget for WifiBadge<'_> {
     }
 }
 
-struct BatteryWidget(BatteryStatus);
+struct BatteryWidget {
+    battery: BatteryStatus,
+    power_source: PowerSource,
+}
 
 impl Widget for BatteryWidget {
     fn draw(&self, target: &mut Framebuffer, bounds: Rectangle) {
-        draw_battery_status(target, bounds, self.0, thin(), filled());
+        draw_battery_status(
+            target,
+            bounds,
+            self.battery,
+            self.power_source,
+            thin(),
+            filled(),
+        );
     }
 }
 
@@ -1252,10 +1266,11 @@ fn draw_battery_status(
     target: &mut Framebuffer,
     bounds: Rectangle,
     status: BatteryStatus,
+    power_source: PowerSource,
     thin: PrimitiveStyle<BinaryColor>,
     filled: PrimitiveStyle<BinaryColor>,
 ) {
-    if status.usb_powered {
+    if power_source.is_external() {
         draw_lightning(target, bounds, filled);
     }
     draw_battery(target, bounds, status.reading, thin, filled);

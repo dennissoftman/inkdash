@@ -1,6 +1,7 @@
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use crate::commands::CommandMessage;
+use crate::notifications::Notification;
 use crate::weather::WorkerUpdate;
 
 /// Every asynchronous producer feeds this single queue. The application task
@@ -11,6 +12,7 @@ pub enum AppEvent {
     ClockDue,
     WeatherDue,
     WeatherCompleted(WorkerUpdate),
+    Notification(Notification),
     WifiChanged,
     ReconnectDue,
 }

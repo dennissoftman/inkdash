@@ -184,6 +184,7 @@ console and automatically returning to ordinary commands after playback.
 | `src/weather.rs` | current/daily/hourly Open-Meteo data and background refresh scheduling |
 | `src/ink_stacks.rs` | 1-bit framebuffer plus fixed/fill row and column layout |
 | `src/language.rs` | persistent language setting and extensible UI translation tables |
+| `src/notifications.rs` | semantic battery-alert scheduling and quiet-hour policy |
 | `src/dashboard.rs` | dashboard state, page selection, and render entry point |
 | `src/dashboard/widgets.rs` | composable status, clock, climate, and weather widgets |
 | `src/epaper.rs` | SPI panel driver, dirty-window writes, and refresh waveforms |
@@ -203,7 +204,10 @@ repeatedly. The e-paper BUSY pin is also awaited by interrupt, raced against a
 one-shot timeout. The SHTC3 returns to sleep after every event-triggered
 measurement, and I2S plus the speaker amplifier are enabled only during
 playback. CPU dynamic-frequency scaling uses 40 MHz while idle and up to 160 MHz
-when ESP-IDF peripheral locks require it.
+when ESP-IDF peripheral locks require it while attached to a USB host. On
+battery, the ceiling is 80 MHz. Power-source reads use ESP-IDF's cached USB SOF
+state and do not block. Existing application events reconcile the CPU policy
+and invalidate source-dependent UI state, so no polling timer is added.
 Connected Wi-Fi uses maximum modem power saving while preserving the station
 connection. If a saved network is unavailable, a non-blocking reconnect is
 requested by a one-shot event after five minutes. ESP-IDF Wi-Fi/IP events update
@@ -212,6 +216,13 @@ sampled on minute events. Pixel reconciliation suppresses the badge refresh
 unless its rendered appearance changes. Automatic light sleep is intentionally
 disabled because it would make the native USB Serial/JTAG command interface
 intermittently unavailable.
+
+While running on battery, the minute event also evaluates semantic low-battery
+notifications. At 25% or below, a half-volume descending reminder repeats every
+30 minutes. At 10% or below, a louder urgent sequence takes precedence and
+repeats every five minutes. Both are suppressed outside 10:00-22:00 and whenever
+external power is detected. Small recovery margins prevent ADC noise around a
+threshold from repeatedly retriggering a new alert.
 
 The SHTC3 temperature applies Waveshare's documented `-4 C` board/enclosure
 compensation. Battery percentage is an estimate from voltage because this board
