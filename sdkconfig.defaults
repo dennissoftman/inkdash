@@ -11,5 +11,10 @@ CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 # crystal while idle. Automatic light sleep stays off so USB remains responsive.
 CONFIG_PM_ENABLE=y
 
+# A newly installed OTA image gets one boot to prove that the application can
+# initialize and render. Until it confirms that state, a reboot rolls back to
+# the previous slot.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
 # ESP32-S3-PICO-1-N8R8 has 8 MB embedded flash.
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y

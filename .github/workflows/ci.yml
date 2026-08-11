@@ -1,0 +1,45 @@
+name: Firmware CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  OTA_ENDPOINT: https://github.com/${{ github.repository }}/releases/latest/download/ota-manifest.json
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install ESP Xtensa Rust toolchain
+        uses: esp-rs/xtensa-toolchain@ec6d36527049a7f4fb2cb0c1a644668c1bb8a2a4 # v1.7.0
+        with:
+          default: true
+          buildtargets: esp32s3
+          version: 1.95.0.0
+          ldproxy: true
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint firmware
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Build release firmware
+        run: cargo build --locked --release

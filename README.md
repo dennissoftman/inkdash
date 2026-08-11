@@ -185,13 +185,14 @@ console and automatically returning to ordinary commands after playback.
 | `src/ink_stacks.rs` | 1-bit framebuffer plus fixed/fill row and column layout |
 | `src/language.rs` | persistent language setting and extensible UI translation tables |
 | `src/notifications.rs` | semantic battery-alert scheduling and quiet-hour policy |
+| `src/ota.rs` | host-neutral manifest lookup, cancellable download, digest verification, and ESP-IDF OTA writes |
 | `src/dashboard.rs` | dashboard state, page selection, and render entry point |
 | `src/dashboard/widgets.rs` | composable status, clock, climate, and weather widgets |
 | `src/epaper.rs` | SPI panel driver, dirty-window writes, and refresh waveforms |
 | `src/i2c_bus.rs` | ESP-IDF 5 current master-bus API used by onboard sensors |
 | `src/power.rs` | CPU dynamic-frequency and always-responsive USB policy |
 | `espflash.toml` | 8 MB flash size and custom partition-table selection |
-| `partitions.csv` | NVS, PHY, and enlarged single-app flash layout |
+| `partitions.csv` | NVS, PHY, rollback metadata, and two safe OTA application slots |
 
 ## Power behavior
 
@@ -267,6 +268,87 @@ cargo build
 espflash flash --monitor --port /dev/cu.usbmodem101 \
   target/xtensa-esp32s3-espidf/debug/esp-smart-eink
 ```
+
+Set a manifest endpoint at compile time to enable update checks in a locally
+built image. It can be hosted on GitHub, a CDN, or any HTTPS server. GitHub
+Actions supplies a stable latest-release manifest URL automatically:
+
+```sh
+OTA_ENDPOINT=https://example.com/device/ota-manifest.json cargo build --release
+```
+
+## Firmware updates and releases
+
+Hold **BOOT + PWR** for two seconds to open the firmware update screen. The
+button task uses GPIO edge interrupts and a one-shot gesture timeout; it does
+not poll. Release lookup and download run on a dedicated worker so the event
+loop and button handling remain responsive.
+
+The endpoint returns a deliberately small host-neutral JSON document:
+
+```json
+{
+  "schema_version": 1,
+  "version": "0.2.0",
+  "firmware_url": "https://cdn.example.com/esp-smart-eink-ota.bin",
+  "size": 1415648,
+  "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+}
+```
+
+Only semantic versions newer than the running package version are offered.
+Press **BOOT** within one minute to install, or **PWR** to cancel. PWR also
+cancels a download between chunks. The final validation and boot-selection
+step is intentionally non-cancellable and is labelled "Do not power off". No
+Wi-Fi, HTTP failures, invalid manifests, truncated or oversized downloads,
+digest mismatches, invalid ESP images, flash errors, and unavailable OTA slots
+all leave the current boot slot selected and show an error instead of rebooting.
+
+The USB CLI can override the build default without reflashing. The override is
+stored in NVS and takes effect on the next update check:
+
+```text
+OTA ENDPOINT GET
+OTA ENDPOINT SET "https://example.com/device/ota-manifest.json"
+OTA ENDPOINT CLEAR
+```
+
+The friendly host CLI exposes the same setting:
+
+```sh
+python3 scripts/device_cli.py ota endpoint get
+python3 scripts/device_cli.py ota endpoint set https://example.com/device/ota-manifest.json
+python3 scripts/device_cli.py ota endpoint clear
+```
+
+Only HTTPS endpoints and firmware URLs are accepted. `CLEAR` restores the
+build-time `OTA_ENDPOINT`, or disables checks if the image has no default.
+
+The download is written only to the inactive application slot. ESP-IDF validates
+the completed image before `otadata` selects it for the next boot. Bootloader
+rollback is enabled: the new image is marked healthy only after its first
+successful display render; otherwise a subsequent reboot returns to the prior
+slot.
+
+The partition change from the original single `factory` application to
+`otadata`, `ota_0`, and `ota_1` must be installed once over USB with the normal
+`espflash flash` command. It cannot safely migrate itself while executing from
+the old partition layout.
+
+GitHub Actions provides two workflows:
+
+- `Firmware CI` runs formatting, Clippy, and a release build for pull requests
+  and `main`.
+- `Firmware Release` is started manually with the version already present in
+  `Cargo.toml`. It builds from `main`, creates `v<version>`, and publishes the
+  OTA application image, `ota-manifest.json`, a merged factory image, the ELF,
+  partition table, and SHA-256 checksums. Action dependencies and the ESP
+  toolchain are pinned.
+
+On GitHub, the compiled default points to
+`releases/latest/download/ota-manifest.json`; the manifest then points to the
+versioned firmware asset. Moving the manifest and binary to another host needs
+no firmware logic change.
 
 ## Factory firmware backup and restore
 

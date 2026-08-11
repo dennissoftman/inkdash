@@ -117,6 +117,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     language_set.add_argument("language", choices=("en", "ru"))
 
+    ota_parser = commands.add_parser("ota", help="configure firmware update checks")
+    ota_commands = ota_parser.add_subparsers(dest="ota_command", required=True)
+    endpoint_parser = ota_commands.add_parser(
+        "endpoint", help="read or override the OTA manifest endpoint"
+    )
+    endpoint_commands = endpoint_parser.add_subparsers(
+        dest="endpoint_command", required=True
+    )
+    endpoint_commands.add_parser("get", help="show the effective manifest endpoint")
+    endpoint_set = endpoint_commands.add_parser(
+        "set", help="persist an HTTPS manifest endpoint override"
+    )
+    endpoint_set.add_argument("url")
+    endpoint_commands.add_parser(
+        "clear", help="restore the firmware's build-time endpoint"
+    )
+
     commands.add_parser("status", help="show RTC and Wi-Fi status")
     commands.add_parser("refresh", help="request an immediate display refresh")
     audio_parser = commands.add_parser("audio", help="test the onboard speaker")
@@ -173,6 +190,20 @@ def validate_wifi_value(value: str, label: str, minimum: int, maximum: int) -> N
         raise CliError(f"{label} cannot contain NUL or newline characters")
 
 
+def validate_ota_endpoint(value: str) -> None:
+    if not value.startswith("https://"):
+        raise CliError("OTA endpoint must use HTTPS")
+    if (
+        len(value.encode("ascii", errors="ignore")) != len(value)
+        or not 1 <= len(value) <= 512
+    ):
+        raise CliError("OTA endpoint must contain 1 to 512 ASCII bytes")
+    if any(not character.isprintable() or character.isspace() for character in value):
+        raise CliError("OTA endpoint cannot contain whitespace or control characters")
+    if any(character in value for character in ('"', "\\")):
+        raise CliError("OTA endpoint cannot contain quotes or backslashes")
+
+
 def command_for(args: argparse.Namespace) -> tuple[str | None, int]:
     if args.command == "time":
         if args.time_command == "get":
@@ -227,6 +258,14 @@ def command_for(args: argparse.Namespace) -> tuple[str | None, int]:
         if args.language_command == "get":
             return "LANGUAGE GET", 1
         return f"LANGUAGE SET {args.language.upper()}", 1
+
+    if args.command == "ota":
+        if args.endpoint_command == "get":
+            return "OTA ENDPOINT GET", 1
+        if args.endpoint_command == "clear":
+            return "OTA ENDPOINT CLEAR", 1
+        validate_ota_endpoint(args.url)
+        return f"OTA ENDPOINT SET {quote_device_argument(args.url)}", 1
 
     if args.command == "status":
         return "STATUS", 2

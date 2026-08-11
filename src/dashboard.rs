@@ -6,6 +6,7 @@ use crate::battery::BatteryStatus;
 use crate::datetime::DateTime;
 use crate::ink_stacks::Framebuffer;
 use crate::language::Language;
+use crate::ota;
 use crate::power::PowerSource;
 use crate::shtc3::ClimateReading;
 use crate::weather::Weather;
@@ -47,6 +48,11 @@ impl DashboardScreen {
     }
 }
 
-pub fn render(framebuffer: &mut Framebuffer, data: &DashboardData, screen: DashboardScreen) {
-    widgets::render(framebuffer, data, screen);
+pub fn render(
+    framebuffer: &mut Framebuffer,
+    data: &DashboardData,
+    screen: DashboardScreen,
+    ota_screen: &ota::Screen,
+) {
+    widgets::render(framebuffer, data, screen, ota_screen);
 }

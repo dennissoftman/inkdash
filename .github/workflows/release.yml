@@ -1,0 +1,107 @@
+name: Firmware Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Cargo package version to release, without the v prefix
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: firmware-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  OTA_ENDPOINT: https://github.com/${{ github.repository }}/releases/latest/download/ota-manifest.json
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out main
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+
+      - name: Install ESP Xtensa Rust toolchain
+        uses: esp-rs/xtensa-toolchain@ec6d36527049a7f4fb2cb0c1a644668c1bb8a2a4 # v1.7.0
+        with:
+          default: true
+          buildtargets: esp32s3
+          version: 1.95.0.0
+          ldproxy: true
+
+      - name: Validate release version
+        id: version
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          PACKAGE_VERSION="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "esp-smart-eink") | .version')"
+          if [[ "$REQUESTED_VERSION" != "$PACKAGE_VERSION" ]]; then
+            echo "Requested $REQUESTED_VERSION but Cargo.toml contains $PACKAGE_VERSION" >&2
+            exit 1
+          fi
+          TAG="v$PACKAGE_VERSION"
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists" >&2
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Lint release source
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Build release firmware
+        run: cargo build --locked --release
+
+      - name: Install native flashing dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes libudev-dev
+
+      - name: Install espflash image tool
+        run: cargo install espflash --version 4.5.0 --locked
+
+      - name: Package flashable images
+        shell: bash
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          ELF="target/xtensa-esp32s3-espidf/release/esp-smart-eink"
+          mkdir -p dist
+          cp "$ELF" "dist/esp-smart-eink-$TAG.elf"
+          cp partitions.csv "dist/partitions-$TAG.csv"
+          espflash save-image --skip-update-check --chip esp32s3 --flash-size 8mb --partition-table partitions.csv "$ELF" dist/esp-smart-eink-ota.bin
+          espflash save-image --skip-update-check --chip esp32s3 --flash-size 8mb --partition-table partitions.csv --merge --skip-padding "$ELF" "dist/esp-smart-eink-$TAG-factory.bin"
+          FIRMWARE_SHA256="$(sha256sum dist/esp-smart-eink-ota.bin | cut -d ' ' -f 1)"
+          FIRMWARE_SIZE="$(stat -c '%s' dist/esp-smart-eink-ota.bin)"
+          jq -n \
+            --arg version "${TAG#v}" \
+            --arg firmware_url "https://github.com/$REPOSITORY/releases/download/$TAG/esp-smart-eink-ota.bin" \
+            --arg sha256 "$FIRMWARE_SHA256" \
+            --argjson size "$FIRMWARE_SIZE" \
+            '{schema_version: 1, version: $version, firmware_url: $firmware_url, size: $size, sha256: $sha256}' \
+            > dist/ota-manifest.json
+          cd dist
+          sha256sum esp-smart-eink-*.bin esp-smart-eink-*.elf partitions-*.csv ota-manifest.json > SHA256SUMS
+
+      - name: Create versioned release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "$TAG" --generate-notes --fail-on-no-commits

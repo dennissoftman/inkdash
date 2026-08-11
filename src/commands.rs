@@ -14,8 +14,6 @@ use crate::language::Language;
 
 #[derive(Clone, Debug)]
 pub enum Command {
-    NextScreen,
-    PreviousScreen,
     Ping,
     Help,
     TimeGet,
@@ -31,6 +29,9 @@ pub enum Command {
     WifiClear,
     WifiScan,
     WifiStatus,
+    OtaEndpointGet,
+    OtaEndpointSet(String),
+    OtaEndpointClear,
     Status,
     Refresh,
     AudioBeep {
@@ -144,6 +145,9 @@ pub fn help_text() -> &'static str {
      WIFI SCAN\n\
      WIFI STATUS\n\
      WIFI CLEAR\n\
+     OTA ENDPOINT GET\n\
+     OTA ENDPOINT SET \"https://example.com/ota-manifest.json\"\n\
+     OTA ENDPOINT CLEAR\n\
      STATUS\n\
      REFRESH\n\
      AUDIO BEEP [frequency_hz] [duration_ms] [volume_percent]\n\
@@ -230,6 +234,21 @@ fn parse(line: &str) -> Result<Command> {
         [group, action] if group == "WIFI" && action == "STATUS" => Ok(Command::WifiStatus),
         [group, action] if group == "WIFI" && action == "SCAN" => Ok(Command::WifiScan),
         [group, action] if group == "WIFI" && action == "CLEAR" => Ok(Command::WifiClear),
+        [group, endpoint, action]
+            if group == "OTA" && endpoint == "ENDPOINT" && action == "GET" =>
+        {
+            Ok(Command::OtaEndpointGet)
+        }
+        [group, endpoint, action]
+            if group == "OTA" && endpoint == "ENDPOINT" && action == "CLEAR" =>
+        {
+            Ok(Command::OtaEndpointClear)
+        }
+        [group, endpoint, action, _]
+            if group == "OTA" && endpoint == "ENDPOINT" && action == "SET" =>
+        {
+            Ok(Command::OtaEndpointSet(words[3].clone()))
+        }
         [group, action, _, _] if group == "WIFI" && action == "SET" => {
             let ssid = words[2].clone();
             let password = words[3].clone();

@@ -12,6 +12,7 @@ mod ink_stacks;
 mod language;
 mod location;
 mod notifications;
+mod ota;
 mod power;
 mod rtc;
 mod shtc3;
@@ -26,6 +27,7 @@ use anyhow::Result;
 use audio::Audio;
 use battery::{Battery, BatteryStatus};
 use board::BoardPower;
+use buttons::ButtonEvent;
 use commands::Command;
 use dashboard::{DashboardData, DashboardScreen};
 use embedded_graphics::geometry::Size;
@@ -56,6 +58,11 @@ use wifi::{WifiCredentials, WifiManager};
 
 const FULL_REFRESH_AFTER_PARTIALS: u8 = 30;
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+struct CommandSettings<'a> {
+    language: &'a LanguageStore,
+    ota_endpoint: &'a ota::EndpointStore,
+}
 
 fn main() -> Result<()> {
     esp_idf_svc::sys::link_patches();
@@ -136,6 +143,11 @@ fn main() -> Result<()> {
     let system_loop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
     let language_store = LanguageStore::new(nvs.clone())?;
+    let ota_endpoint_store = ota::EndpointStore::new(nvs.clone())?;
+    let command_settings = CommandSettings {
+        language: &language_store,
+        ota_endpoint: &ota_endpoint_store,
+    };
     let language = language_store.load()?;
     let (event_sender, events) = events::channel();
 
@@ -170,8 +182,17 @@ fn main() -> Result<()> {
     let reconnect_timer = timer_service.timer(move || {
         let _ = reconnect_sender.send(AppEvent::ReconnectDue);
     })?;
+    let ota_confirmation_sender = event_sender.clone();
+    let ota_confirmation_timer = timer_service.timer(move || {
+        let _ = ota_confirmation_sender.send(AppEvent::OtaConfirmationExpired);
+    })?;
+    let ota_restart_sender = event_sender.clone();
+    let ota_restart_timer = timer_service.timer(move || {
+        let _ = ota_restart_sender.send(AppEvent::OtaRestartDue);
+    })?;
 
     let mut weather = WeatherService::start(nvs.clone(), event_sender.clone())?;
+    let ota_service = ota::Service::start(event_sender.clone())?;
     let mut wifi = WifiManager::new(peripherals.modem, system_loop, nvs)?;
     match wifi.connect_saved() {
         Ok(true) => log::info!("Connected using saved Wi-Fi credentials"),
@@ -192,6 +213,10 @@ fn main() -> Result<()> {
     let mut render_requested = true;
     let mut force_full_refresh = false;
     let mut screen = DashboardScreen::Home;
+    let mut ota_screen = ota::Screen::Hidden;
+    let mut pending_update: Option<ota::UpdateInfo> = None;
+    let mut ota_operation_active = false;
+    let mut running_image_confirmation_checked = false;
     // The USB SOF monitor has had time to settle during peripheral setup.
     power_policy.refresh()?;
     let mut data = collect_dashboard_data(
@@ -210,7 +235,7 @@ fn main() -> Result<()> {
 
     loop {
         if render_requested && !audio.is_pcm_active() {
-            dashboard::render(&mut next_frame, &data, screen);
+            dashboard::render(&mut next_frame, &data, screen, &ota_screen);
             let changed = displayed_frame.changed_regions(&next_frame);
             let needs_full = force_full_refresh
                 || !panel_initialized
@@ -272,6 +297,18 @@ fn main() -> Result<()> {
                             None => "not detected".into(),
                         },
                     );
+                    if !running_image_confirmation_checked {
+                        running_image_confirmation_checked = true;
+                        match ota::confirm_running_image() {
+                            Ok(true) => {
+                                log::info!("Confirmed healthy OTA image after first render")
+                            }
+                            Ok(false) => {}
+                            Err(error) => {
+                                log::error!("Confirming running OTA image failed: {error:#}")
+                            }
+                        }
+                    }
                 }
                 Err(error) => log::error!("Dashboard refresh failed: {error:#}"),
             }
@@ -300,43 +337,121 @@ fn main() -> Result<()> {
                 render_requested = true;
             }
             match event {
+                AppEvent::Button(button) => match button {
+                    ButtonEvent::CheckForUpdates
+                        if !ota_screen.can_start_check() || ota_operation_active => {}
+                    ButtonEvent::CheckForUpdates => {
+                        ota_service.cancel();
+                        ota_confirmation_timer.cancel()?;
+                        pending_update = None;
+                        ota_screen = ota::Screen::Checking;
+                        render_requested = true;
+                        force_full_refresh = true;
+                        weather_timer.cancel()?;
+                        if !data.wifi_connected {
+                            ota_screen = ota::Screen::Failed {
+                                message: "No Wi-Fi connection".into(),
+                            };
+                        } else {
+                            match ota_endpoint_store.effective() {
+                                Ok(Some(endpoint)) => {
+                                    if ota_service.check(endpoint.url) {
+                                        ota_operation_active = true;
+                                    } else {
+                                        ota_screen = ota::Screen::Failed {
+                                            message: "OTA worker is unavailable".into(),
+                                        };
+                                    }
+                                }
+                                Ok(None) => {
+                                    ota_screen = ota::Screen::Failed {
+                                        message: "OTA endpoint is not configured".into(),
+                                    };
+                                }
+                                Err(error) => {
+                                    ota_screen = ota::Screen::Failed {
+                                        message: format!("OTA endpoint: {error:#}"),
+                                    };
+                                }
+                            }
+                        }
+                    }
+                    ButtonEvent::Boot if ota_screen.can_accept() => {
+                        ota_confirmation_timer.cancel()?;
+                        if let Some(update) = pending_update.take() {
+                            let version = update.version.clone();
+                            let total = update.size;
+                            ota_screen = ota::Screen::Downloading {
+                                version,
+                                percent: 0,
+                            };
+                            render_requested = true;
+                            if !ota_service.install(update) {
+                                ota_screen = ota::Screen::Failed {
+                                    message: "OTA worker is unavailable".into(),
+                                };
+                                if data.wifi_connected {
+                                    weather_timer.after(Duration::from_millis(1))?;
+                                }
+                            } else {
+                                ota_operation_active = true;
+                                log::info!("OTA installation accepted ({total} bytes)");
+                            }
+                        }
+                    }
+                    ButtonEvent::Boot if !ota_screen.is_visible() => {
+                        screen = screen.next();
+                        render_requested = true;
+                        force_full_refresh = true;
+                    }
+                    ButtonEvent::Boot => {}
+                    ButtonEvent::Power
+                        if matches!(
+                            ota_screen,
+                            ota::Screen::Finalizing { .. } | ota::Screen::Restarting { .. }
+                        ) => {}
+                    ButtonEvent::Power if ota_screen.is_visible() => {
+                        if ota_screen.can_cancel() {
+                            ota_service.cancel();
+                        }
+                        ota_confirmation_timer.cancel()?;
+                        pending_update = None;
+                        ota_screen = ota::Screen::Hidden;
+                        render_requested = true;
+                        force_full_refresh = true;
+                        if data.wifi_connected {
+                            weather_timer.after(Duration::from_millis(1))?;
+                        }
+                    }
+                    ButtonEvent::Power => {
+                        screen = screen.previous();
+                        render_requested = true;
+                        force_full_refresh = true;
+                    }
+                },
                 AppEvent::Command(Ok(command)) => {
                     let clock_changed = matches!(&command, Command::TimeSet(_));
                     let explicit_refresh = matches!(&command, Command::Refresh);
                     let language_changed = matches!(&command, Command::LanguageSet(_));
-                    match command {
-                        Command::NextScreen => {
-                            screen = screen.next();
-                            render_requested = true;
-                            force_full_refresh = true;
-                        }
-                        Command::PreviousScreen => {
-                            screen = screen.previous();
-                            render_requested = true;
-                            force_full_refresh = true;
-                        }
-                        command => {
-                            if handle_command(
-                                command,
-                                &rtc,
-                                &mut i2c,
-                                &mut wifi,
-                                &mut audio,
-                                &language_store,
-                                &mut data.language,
-                            ) {
-                                refresh_dashboard_data(
-                                    &mut data,
-                                    &rtc,
-                                    &climate_sensor,
-                                    &mut i2c,
-                                    &mut battery,
-                                    &wifi,
-                                    weather.latest(),
-                                );
-                                render_requested = true;
-                            }
-                        }
+                    if handle_command(
+                        command,
+                        &rtc,
+                        &mut i2c,
+                        &mut wifi,
+                        &mut audio,
+                        &command_settings,
+                        &mut data.language,
+                    ) {
+                        refresh_dashboard_data(
+                            &mut data,
+                            &rtc,
+                            &climate_sensor,
+                            &mut i2c,
+                            &mut battery,
+                            &wifi,
+                            weather.latest(),
+                        );
+                        render_requested = true;
                     }
                     if explicit_refresh {
                         force_full_refresh = true;
@@ -383,7 +498,12 @@ fn main() -> Result<()> {
                     })?;
                 }
                 AppEvent::Notification(notification) => {
-                    if power::source().is_external() {
+                    if ota_screen.is_visible() {
+                        log::debug!(
+                            "Suppressing {} notification while OTA screen is active",
+                            notification.name()
+                        );
+                    } else if power::source().is_external() {
                         log::debug!(
                             "Suppressing {} notification after external power attached",
                             notification.name()
@@ -421,6 +541,100 @@ fn main() -> Result<()> {
                         reconnect_timer.after(RECONNECT_INTERVAL)?;
                     }
                 },
+                AppEvent::Ota(update) => {
+                    match update {
+                        ota::WorkerEvent::Checked(Ok(ota::CheckResult::UpToDate))
+                            if matches!(ota_screen, ota::Screen::Checking) =>
+                        {
+                            ota_operation_active = false;
+                            ota_screen = ota::Screen::UpToDate;
+                            if data.wifi_connected {
+                                weather_timer.after(Duration::from_millis(1))?;
+                            }
+                        }
+                        ota::WorkerEvent::Checked(Ok(ota::CheckResult::Available(update)))
+                            if matches!(ota_screen, ota::Screen::Checking) =>
+                        {
+                            ota_operation_active = false;
+                            ota_screen = ota::Screen::Available {
+                                version: update.version.clone(),
+                                size: update.size,
+                            };
+                            pending_update = Some(update);
+                            ota_confirmation_timer.after(Duration::from_secs(60))?;
+                        }
+                        ota::WorkerEvent::Checked(Err(error))
+                            if matches!(ota_screen, ota::Screen::Checking) =>
+                        {
+                            ota_operation_active = false;
+                            ota_screen = ota::Screen::Failed { message: error };
+                            if data.wifi_connected {
+                                weather_timer.after(Duration::from_millis(1))?;
+                            }
+                        }
+                        ota::WorkerEvent::Checked(_) => {
+                            ota_operation_active = false;
+                        }
+                        ota::WorkerEvent::Progress {
+                            version,
+                            downloaded,
+                            total,
+                        } if ota_screen.is_visible() => {
+                            let percent = ((downloaded as u64 * 100) / total as u64) as u8;
+                            ota_screen = ota::Screen::Downloading { version, percent };
+                        }
+                        ota::WorkerEvent::Finalizing { version } if ota_screen.is_visible() => {
+                            ota_screen = ota::Screen::Finalizing { version };
+                        }
+                        ota::WorkerEvent::Installed { version } => {
+                            ota_operation_active = false;
+                            ota_screen = ota::Screen::Restarting { version };
+                            force_full_refresh = true;
+                            ota_restart_timer.after(Duration::from_secs(3))?;
+                        }
+                        ota::WorkerEvent::InstallFailed(error) if ota_screen.is_visible() => {
+                            ota_operation_active = false;
+                            ota_screen = ota::Screen::Failed { message: error };
+                            if data.wifi_connected {
+                                weather_timer.after(Duration::from_millis(1))?;
+                            }
+                        }
+                        ota::WorkerEvent::InstallFailed(_) => {
+                            ota_operation_active = false;
+                            if data.wifi_connected {
+                                weather_timer.after(Duration::from_millis(1))?;
+                            }
+                        }
+                        ota::WorkerEvent::Cancelled => {
+                            ota_operation_active = false;
+                            if ota_screen.is_visible() {
+                                ota_screen = ota::Screen::Hidden;
+                                force_full_refresh = true;
+                            }
+                            if data.wifi_connected {
+                                weather_timer.after(Duration::from_millis(1))?;
+                            }
+                        }
+                        _ => {}
+                    }
+                    render_requested = true;
+                }
+                AppEvent::OtaConfirmationExpired => {
+                    if matches!(ota_screen, ota::Screen::Available { .. }) {
+                        pending_update = None;
+                        ota_screen = ota::Screen::Hidden;
+                        render_requested = true;
+                        force_full_refresh = true;
+                        if data.wifi_connected {
+                            weather_timer.after(Duration::from_millis(1))?;
+                        }
+                    }
+                }
+                AppEvent::OtaRestartDue => {
+                    if matches!(ota_screen, ota::Screen::Restarting { .. }) {
+                        ota::restart();
+                    }
+                }
             }
         }
     }
@@ -530,7 +744,7 @@ fn handle_command(
     i2c: &mut I2cBus<'_>,
     wifi: &mut WifiManager,
     audio: &mut Audio<'_>,
-    language_store: &LanguageStore,
+    settings: &CommandSettings<'_>,
     language: &mut Language,
 ) -> bool {
     let refresh = matches!(
@@ -542,7 +756,6 @@ fn handle_command(
             | Command::Refresh
     );
     match command {
-        Command::NextScreen | Command::PreviousScreen => unreachable!("handled by main loop"),
         Command::Ping => println!("OK PONG"),
         Command::Help => println!("{}", commands::help_text()),
         Command::TimeGet => match rtc.read(i2c) {
@@ -566,7 +779,7 @@ fn handle_command(
             }
         }
         Command::LanguageGet => println!("OK LANGUAGE {}", language.code()),
-        Command::LanguageSet(value) => match language_store.save(value) {
+        Command::LanguageSet(value) => match settings.language.save(value) {
             Ok(()) => {
                 *language = value;
                 println!("OK LANGUAGE {}", value.code());
@@ -591,6 +804,15 @@ fn handle_command(
         },
         Command::WifiScan => print_wifi_scan(wifi),
         Command::WifiStatus => print_wifi_status(wifi),
+        Command::OtaEndpointGet => print_ota_endpoint(settings.ota_endpoint),
+        Command::OtaEndpointSet(endpoint) => match settings.ota_endpoint.set_override(&endpoint) {
+            Ok(()) => println!("OK OTA ENDPOINT source=override url=\"{endpoint}\""),
+            Err(error) => println!("ERR OTA ENDPOINT {error:#}"),
+        },
+        Command::OtaEndpointClear => match settings.ota_endpoint.clear_override() {
+            Ok(()) => println!("OK OTA ENDPOINT override=cleared"),
+            Err(error) => println!("ERR OTA ENDPOINT {error:#}"),
+        },
         Command::Status => {
             match rtc.read(i2c) {
                 Ok(value) => println!("OK TIME {value}"),
@@ -670,6 +892,18 @@ fn print_wifi_status(wifi: &WifiManager) {
                 .unwrap_or_else(|| "none".to_owned())
         ),
         Err(error) => println!("ERR WIFI {error:#}"),
+    }
+}
+
+fn print_ota_endpoint(store: &ota::EndpointStore) {
+    match store.effective() {
+        Ok(Some(endpoint)) => println!(
+            "OK OTA ENDPOINT source={} url=\"{}\"",
+            endpoint.source.label(),
+            endpoint.url
+        ),
+        Ok(None) => println!("OK OTA ENDPOINT source=none url=none"),
+        Err(error) => println!("ERR OTA ENDPOINT {error:#}"),
     }
 }
 
