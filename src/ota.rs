@@ -20,6 +20,16 @@ const ENDPOINT_KEY: &str = "ota_endpoint";
 const ENDPOINT_LENGTH_LIMIT: usize = 512;
 const MANIFEST_RESPONSE_LIMIT: usize = 4096;
 const DOWNLOAD_BUFFER_SIZE: usize = 4096;
+// A release asset on GitHub answers with two redirects whose headers run to about
+// five kilobytes, the second carrying a signed URL of more than a kilobyte. Both
+// buffers have to hold that: the response headers on the way in, and the
+// redirected request line on the way out. Undersized buffers fail the transfer
+// with a bare ESP_FAIL, which is indistinguishable from a network fault.
+// Measured against GitHub: 5.2 KB of response headers, and a redirected request
+// line of about 1.2 KB. Both are sized with margin rather than generously, since
+// the free heap dips to roughly 69 KiB during a TLS handshake as it is.
+const HTTP_HEADER_BUFFER_SIZE: usize = 8192;
+const HTTP_REQUEST_BUFFER_SIZE: usize = 3072;
 const OTA_TASK_STACK_SIZE: usize = 20 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -289,7 +299,8 @@ fn install_update(update: &UpdateInfo, events: &EventSender, cancel: &AtomicBool
     }
 
     let configuration = Configuration {
-        buffer_size: Some(DOWNLOAD_BUFFER_SIZE),
+        buffer_size: Some(HTTP_HEADER_BUFFER_SIZE),
+        buffer_size_tx: Some(HTTP_REQUEST_BUFFER_SIZE),
         timeout: Some(config::OTA_DOWNLOAD_TIMEOUT),
         follow_redirects_policy: FollowRedirectsPolicy::FollowGetHead,
         crt_bundle_attach: Some(sys::esp_crt_bundle_attach),
@@ -455,7 +466,8 @@ pub fn restart() -> ! {
 
 fn get_manifest_json(url: &str) -> Result<UpdateManifest> {
     let configuration = Configuration {
-        buffer_size: Some(2048),
+        buffer_size: Some(HTTP_HEADER_BUFFER_SIZE),
+        buffer_size_tx: Some(HTTP_REQUEST_BUFFER_SIZE),
         timeout: Some(config::OTA_MANIFEST_TIMEOUT),
         follow_redirects_policy: FollowRedirectsPolicy::FollowGetHead,
         crt_bundle_attach: Some(sys::esp_crt_bundle_attach),
