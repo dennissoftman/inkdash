@@ -60,9 +60,15 @@ use shtc3::Shtc3;
 use weather::WeatherService;
 use wifi::{WifiCredentials, WifiManager};
 
-struct CommandSettings<'a> {
-    language: &'a LanguageStore,
+/// Everything a console command may need to read or change.
+struct CommandContext<'a, 'i, 's> {
+    rtc: &'a Rtc,
+    i2c: &'a mut I2cBus<'i>,
+    wifi: &'a mut WifiManager,
+    audio: &'a mut Audio<'s>,
+    language_store: &'a LanguageStore,
     ota_endpoint: &'a ota::EndpointStore,
+    language: &'a mut Language,
 }
 
 fn main() -> Result<()> {
@@ -145,10 +151,6 @@ fn main() -> Result<()> {
     let nvs = EspDefaultNvsPartition::take()?;
     let language_store = LanguageStore::new(nvs.clone())?;
     let ota_endpoint_store = ota::EndpointStore::new(nvs.clone())?;
-    let command_settings = CommandSettings {
-        language: &language_store,
-        ota_endpoint: &ota_endpoint_store,
-    };
     let language = language_store.load()?;
     let (event_sender, events) = events::channel();
 
@@ -447,12 +449,15 @@ fn main() -> Result<()> {
                     let language_changed = matches!(&command, Command::LanguageSet(_));
                     if handle_command(
                         command,
-                        &rtc,
-                        &mut i2c,
-                        &mut wifi,
-                        &mut audio,
-                        &command_settings,
-                        &mut data.language,
+                        &mut CommandContext {
+                            rtc: &rtc,
+                            i2c: &mut i2c,
+                            wifi: &mut wifi,
+                            audio: &mut audio,
+                            language_store: &language_store,
+                            ota_endpoint: &ota_endpoint_store,
+                            language: &mut data.language,
+                        },
                     ) {
                         refresh_dashboard_data(
                             &mut data,
@@ -465,10 +470,7 @@ fn main() -> Result<()> {
                         );
                         render_requested = true;
                     }
-                    if explicit_refresh {
-                        force_full_refresh = true;
-                    }
-                    if language_changed {
+                    if explicit_refresh || language_changed {
                         force_full_refresh = true;
                     }
                     if clock_changed {
@@ -853,15 +855,7 @@ where
     }
 }
 
-fn handle_command(
-    command: Command,
-    rtc: &Rtc,
-    i2c: &mut I2cBus<'_>,
-    wifi: &mut WifiManager,
-    audio: &mut Audio<'_>,
-    settings: &CommandSettings<'_>,
-    language: &mut Language,
-) -> bool {
+fn handle_command(command: Command, context: &mut CommandContext<'_, '_, '_>) -> bool {
     let refresh = matches!(
         &command,
         Command::TimeSet(_)
@@ -870,6 +864,15 @@ fn handle_command(
             | Command::WifiClear
             | Command::Refresh
     );
+    let CommandContext {
+        rtc,
+        i2c,
+        wifi,
+        audio,
+        language_store,
+        ota_endpoint,
+        language,
+    } = context;
     match command {
         Command::Ping => println!("OK PONG"),
         Command::Help => println!("{}", commands::help_text()),
@@ -894,9 +897,9 @@ fn handle_command(
             }
         }
         Command::LanguageGet => println!("OK LANGUAGE {}", language.code()),
-        Command::LanguageSet(value) => match settings.language.save(value) {
+        Command::LanguageSet(value) => match language_store.save(value) {
             Ok(()) => {
-                *language = value;
+                **language = value;
                 println!("OK LANGUAGE {}", value.code());
             }
             Err(error) => println!("ERR LANGUAGE {error:#}"),
@@ -919,12 +922,12 @@ fn handle_command(
         },
         Command::WifiScan => print_wifi_scan(wifi),
         Command::WifiStatus => print_wifi_status(wifi),
-        Command::OtaEndpointGet => print_ota_endpoint(settings.ota_endpoint),
-        Command::OtaEndpointSet(endpoint) => match settings.ota_endpoint.set_override(&endpoint) {
+        Command::OtaEndpointGet => print_ota_endpoint(ota_endpoint),
+        Command::OtaEndpointSet(endpoint) => match ota_endpoint.set_override(&endpoint) {
             Ok(()) => println!("OK OTA ENDPOINT source=override url=\"{endpoint}\""),
             Err(error) => println!("ERR OTA ENDPOINT {error:#}"),
         },
-        Command::OtaEndpointClear => match settings.ota_endpoint.clear_override() {
+        Command::OtaEndpointClear => match ota_endpoint.clear_override() {
             Ok(()) => println!("OK OTA ENDPOINT override=cleared"),
             Err(error) => println!("ERR OTA ENDPOINT {error:#}"),
         },
