@@ -68,10 +68,11 @@ jobs:
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
+      # Release profile so the ESP-IDF C build is shared with the next step.
       - name: Lint release source
         run: |
           cargo fmt --all -- --check
-          cargo clippy --locked --all-targets -- -D warnings
+          cargo clippy --locked --release --all-targets -- -D warnings
 
       - name: Build release firmware
         run: cargo build --locked --release
