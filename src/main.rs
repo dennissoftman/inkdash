@@ -382,6 +382,11 @@ fn main() -> Result<()> {
                                 }
                             }
                         }
+                        // Nothing was dispatched, so no OTA completion event will
+                        // restore the weather cadence cancelled just above.
+                        if !ota_operation_active {
+                            weather_timer.after(config::WEATHER_RETRY_INTERVAL)?;
+                        }
                     }
                     ButtonEvent::Boot if ota_screen.can_accept() => {
                         ota_confirmation_timer.cancel()?;
