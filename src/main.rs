@@ -283,7 +283,7 @@ fn main() -> Result<()> {
                     force_full_refresh = false;
                     let (slot, sky) = dashboard::scene(&data);
                     log::info!(
-                        "Dashboard refreshed: time={}, scene={}/{}, temp={}, humidity={}, wifi={}, rssi={}, weather={}, battery={}",
+                        "Dashboard refreshed: time={}, scene={}/{}, temp={}, humidity={}, wifi={}, rssi={}, weather={}, battery={}, heap={}/{} KiB free/min",
                         data.time
                             .map(|value| value.to_string())
                             .unwrap_or_else(|| "unset".into()),
@@ -315,6 +315,8 @@ fn main() -> Result<()> {
                             }
                             None => "not detected".into(),
                         },
+                        unsafe { esp_idf_svc::sys::esp_get_free_heap_size() } / 1024,
+                        unsafe { esp_idf_svc::sys::esp_get_minimum_free_heap_size() } / 1024,
                     );
                     if !running_image_confirmation_checked {
                         running_image_confirmation_checked = true;
