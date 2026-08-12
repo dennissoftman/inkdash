@@ -1,4 +1,4 @@
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::thread;
 
@@ -307,7 +307,7 @@ where
     serde_json::from_slice(&body).context("decoding JSON response")
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Request {
     Cached,
     Refresh,
@@ -316,13 +316,17 @@ enum Request {
 pub type WorkerUpdate = Result<Arc<Location>, String>;
 
 pub struct LocationService {
-    requests: Sender<Request>,
+    requests: SyncSender<Request>,
     latest: Option<Arc<Location>>,
+    in_flight: Option<Request>,
 }
 
 impl LocationService {
     pub fn start(nvs_partition: EspDefaultNvsPartition, events: EventSender) -> Result<Self> {
-        let (request_sender, request_receiver) = mpsc::channel();
+        // One slot, like the weather worker: a lookup already on its way answers
+        // for any caller waiting on one, and an unbounded queue would turn a
+        // spell of network trouble into a backlog of identical HTTPS requests.
+        let (request_sender, request_receiver) = mpsc::sync_channel(1);
         thread::Builder::new()
             .name("location".into())
             .stack_size(config::BACKGROUND_TASK_STACK_SIZE)
@@ -355,22 +359,44 @@ impl LocationService {
         Ok(Self {
             requests: request_sender,
             latest: None,
+            in_flight: None,
         })
     }
 
-    pub fn request(&self) -> bool {
+    pub fn request(&mut self) -> bool {
         self.send(Request::Cached)
     }
 
-    pub fn refresh(&self) -> bool {
+    pub fn refresh(&mut self) -> bool {
         self.send(Request::Refresh)
     }
 
-    fn send(&self, request: Request) -> bool {
-        self.requests.send(request).is_ok()
+    /// Dispatches unless an equivalent lookup is already running. Returns whether
+    /// a `LocationCompleted` event is now expected, so a caller that gets `false`
+    /// knows to arm its own retry instead of waiting for one.
+    fn send(&mut self, request: Request) -> bool {
+        let answered_already = match (self.in_flight, request) {
+            (None, _) => false,
+            (Some(Request::Refresh), _) => true,
+            (Some(Request::Cached), Request::Cached) => true,
+            // A refresh is what tracks timezone and daylight-saving changes, so
+            // it queues behind a cached lookup rather than being dropped.
+            (Some(Request::Cached), Request::Refresh) => false,
+        };
+        if answered_already {
+            return true;
+        }
+        match self.requests.try_send(request) {
+            Ok(()) => {
+                self.in_flight = Some(request);
+                true
+            }
+            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => false,
+        }
     }
 
     pub fn complete(&mut self, update: WorkerUpdate) {
+        self.in_flight = None;
         match update {
             Ok(location) => {
                 self.latest = Some(location);
