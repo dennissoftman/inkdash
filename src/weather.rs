@@ -320,16 +320,22 @@ impl WeatherService {
         })
     }
 
+    /// Dispatches unless a refresh is already running. Returns whether a
+    /// `WeatherCompleted` event is now expected, so a caller that gets `false`
+    /// knows to arm its own retry instead of waiting for one.
     pub fn request(&mut self, location: Arc<Location>) -> bool {
         if self.in_flight {
             return true;
         }
         match self.requests.try_send(location) {
-            Ok(()) | Err(TrySendError::Full(_)) => {
+            Ok(()) => {
                 self.in_flight = true;
                 true
             }
-            Err(TrySendError::Disconnected(_)) => false,
+            // A full channel means the request never reached the worker, so no
+            // completion event will follow; reporting success would strand the
+            // caller waiting for one.
+            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => false,
         }
     }
 
