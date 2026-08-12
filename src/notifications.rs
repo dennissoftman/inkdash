@@ -45,7 +45,7 @@ impl BatteryNotificationSchedule {
         battery_percent: Option<u8>,
         power_source: PowerSource,
     ) -> Option<Notification> {
-        if !time.is_some_and(|time| is_alert_hour(time.hour)) {
+        if !time.is_some_and(|time| is_attended_hour(time.hour)) {
             self.reset();
             return None;
         }
@@ -86,7 +86,9 @@ impl BatteryNotificationSchedule {
     }
 }
 
-const fn is_alert_hour(hour: u8) -> bool {
+/// The hours when someone is likely to be in front of the panel. Battery alerts
+/// and update offers both wait for this window: neither is worth doing at 04:00.
+pub const fn is_attended_hour(hour: u8) -> bool {
     hour >= config::ALERT_START_HOUR && hour < config::ALERT_END_HOUR
 }
 

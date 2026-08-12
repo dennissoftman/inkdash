@@ -60,6 +60,18 @@ pub const OTA_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(value_or_defa
     option_env!("OTA_CONFIRMATION_SECONDS"),
     60,
 ));
+// An unattended device would otherwise never notice a release, since the only
+// other trigger is the BOOT+PWR chord. The check is silent and never takes over
+// the panel: finding an update only raises a badge in the status bar.
+pub const OTA_CHECK_INTERVAL: Duration = Duration::from_secs(value_or_default(
+    option_env!("OTA_CHECK_SECONDS"),
+    24 * 60 * 60,
+));
+/// Long enough after boot for Wi-Fi, NTP, and the first weather fetch to settle.
+pub const OTA_CHECK_STARTUP_DELAY: Duration = Duration::from_secs(value_or_default(
+    option_env!("OTA_CHECK_STARTUP_SECONDS"),
+    60,
+));
 pub const OTA_RESTART_DELAY: Duration =
     Duration::from_secs(value_or_default(option_env!("OTA_RESTART_SECONDS"), 3));
 // Both are per-read socket timeouts rather than limits on a whole transfer. A

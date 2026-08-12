@@ -22,6 +22,7 @@ pub enum AppEvent {
     ReconnectDue,
     NtpSynchronized,
     Ota(OtaWorkerEvent),
+    OtaCheckDue,
     OtaConfirmationExpired,
     OtaRestartDue,
 }

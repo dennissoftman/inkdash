@@ -13,7 +13,8 @@ The dashboard currently shows:
 - current outdoor temperature and conditions plus today's mean, humidity, and
   rain chance from Open-Meteo in the lower-right widget, using sun, cloud, fog,
   rain, snow, and thunderstorm condition icons;
-- Wi-Fi signal strength and the configured network name at the top left;
+- Wi-Fi signal strength and the configured network name at the top left, with a
+  download badge beside the battery once a newer release has been found;
 - a five-level battery icon at the top right, with a lightning bolt on its left
   while attached to a USB host.
 
@@ -343,6 +344,19 @@ espflash flash --monitor --port /dev/cu.usbmodem101 \
   target/xtensa-esp32s3-espidf/debug/inkdash
 ```
 
+Releases are cut by pushing a tag, never by a commit:
+
+```sh
+# Bump the version in Cargo.toml first; the workflow refuses a tag that
+# disagrees with it, because that version is what devices compare against.
+git tag v0.1.1
+git push origin v0.1.1
+```
+
+The workflow then lints, builds, packages the factory and OTA images, writes the
+manifest, and publishes the release. A device that has already been given the
+endpoint picks it up within a day.
+
 Set a manifest endpoint at compile time to enable update checks in a locally
 built image. It can be hosted on GitHub, a CDN, or any HTTPS server. GitHub
 Actions supplies a stable latest-release manifest URL automatically:
@@ -368,6 +382,7 @@ timing policies can be overridden through build environment variables:
 | `INPUT_TASK_STACK_SIZE` | `4096` |
 | `BUTTON_DEBOUNCE_MS` / `BUTTON_LONG_PRESS_SECONDS` | `30` / `2` |
 | `OTA_CONFIRMATION_SECONDS` / `OTA_RESTART_SECONDS` | `60` / `3` |
+| `OTA_CHECK_SECONDS` / `OTA_CHECK_STARTUP_SECONDS` | `86400` / `60` |
 | `OTA_MANIFEST_TIMEOUT_SECONDS` / `OTA_DOWNLOAD_TIMEOUT_SECONDS` | `10` / `60` |
 | `BATTERY_ALERT_START_HOUR` / `BATTERY_ALERT_END_HOUR` | `10` / `22` |
 | `BATTERY_WARNING_PERCENT` / `BATTERY_CRITICAL_PERCENT` | `25` / `10` |
@@ -388,10 +403,23 @@ than deployment policy.
 
 ## Firmware updates and releases
 
-Hold **BOOT + PWR** for two seconds to open the firmware update screen. The
-button task uses GPIO edge interrupts and a one-shot gesture timeout; it does
-not poll. Release lookup and download run on a dedicated worker so the event
-loop and button handling remain responsive.
+The device looks for a release once a day on its own, and once a minute after
+boot. That check is silent: it never takes over the panel. When it finds a newer
+version, a small download badge appears beside the battery and stays there, so an
+offer cannot be missed the way a prompt shown for a minute a day would be.
+
+A background check is skipped, and retried the next day, when Wi-Fi is down, an
+update screen is already open, another OTA operation is running, the hour is
+outside the attended window the battery alerts also use, or the battery is below
+its warning threshold while unplugged. Downloading to the inactive slot is safe
+at any charge — nothing switches unless the digest matches — so that last rule
+is about battery life, not about bricking.
+
+Installing is always deliberate. Hold **BOOT + PWR** for two seconds to open the
+firmware update screen, whether or not the badge is showing. The button task uses
+GPIO edge interrupts and a one-shot gesture timeout; it does not poll. Release
+lookup and download run on a dedicated worker so the event loop and button
+handling remain responsive.
 
 The endpoint returns a deliberately small host-neutral JSON document:
 

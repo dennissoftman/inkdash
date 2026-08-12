@@ -22,6 +22,9 @@ pub struct DashboardData {
     pub wifi_signal_dbm: Option<i8>,
     pub weather: Option<Arc<Weather>>,
     pub language: Language,
+    /// A background check found a newer release. Installing it is still a
+    /// deliberate act: BOOT+PWR, then BOOT to accept.
+    pub update_available: bool,
 }
 
 impl DashboardData {
@@ -39,6 +42,7 @@ impl DashboardData {
             wifi_signal_dbm: None,
             weather: None,
             language,
+            update_available: false,
         }
     }
 }

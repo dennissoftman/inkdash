@@ -190,6 +190,10 @@ fn main() -> Result<()> {
     let ota_confirmation_timer = timer_service.timer(move || {
         let _ = ota_confirmation_sender.send(AppEvent::OtaConfirmationExpired);
     })?;
+    let ota_check_sender = event_sender.clone();
+    let ota_check_timer = timer_service.timer(move || {
+        let _ = ota_check_sender.send(AppEvent::OtaCheckDue);
+    })?;
     let ota_restart_sender = event_sender.clone();
     let ota_restart_timer = timer_service.timer(move || {
         let _ = ota_restart_sender.send(AppEvent::OtaRestartDue);
@@ -243,6 +247,7 @@ fn main() -> Result<()> {
     queue_battery_notification(&mut battery_notifications, &data, &event_sender);
     schedule_clock(&clock_timer, data.time)?;
     weather_timer.after(config::IMMEDIATE_EVENT_DELAY)?;
+    ota_check_timer.after(config::OTA_CHECK_STARTUP_DELAY)?;
 
     loop {
         if render_requested {
@@ -644,6 +649,7 @@ fn main() -> Result<()> {
                             if matches!(ota_screen, ota::Screen::Checking) =>
                         {
                             ota_operation_active = false;
+                            data.update_available = false;
                             ota_screen = ota::Screen::UpToDate;
                             if data.wifi_connected {
                                 weather_timer.after(config::IMMEDIATE_EVENT_DELAY)?;
@@ -653,6 +659,7 @@ fn main() -> Result<()> {
                             if matches!(ota_screen, ota::Screen::Checking) =>
                         {
                             ota_operation_active = false;
+                            data.update_available = true;
                             ota_screen = ota::Screen::Available {
                                 version: update.version.clone(),
                                 size: update.size,
@@ -669,8 +676,24 @@ fn main() -> Result<()> {
                                 weather_timer.after(config::IMMEDIATE_EVENT_DELAY)?;
                             }
                         }
-                        ota::WorkerEvent::Checked(_) => {
+                        // Reached only by a background check, which leaves the
+                        // dashboard alone and speaks through the badge.
+                        ota::WorkerEvent::Checked(Ok(ota::CheckResult::UpToDate)) => {
                             ota_operation_active = false;
+                            data.update_available = false;
+                            log::info!("Background update check: already up to date");
+                        }
+                        ota::WorkerEvent::Checked(Ok(ota::CheckResult::Available(available))) => {
+                            ota_operation_active = false;
+                            data.update_available = true;
+                            log::info!(
+                                "Background update check: v{} available, hold BOOT+PWR to install",
+                                available.version
+                            );
+                        }
+                        ota::WorkerEvent::Checked(Err(error)) => {
+                            ota_operation_active = false;
+                            log::warn!("Background update check failed: {error}");
                         }
                         ota::WorkerEvent::Progress {
                             version,
@@ -715,6 +738,40 @@ fn main() -> Result<()> {
                         _ => {}
                     }
                     render_requested = true;
+                }
+                AppEvent::OtaCheckDue => {
+                    let attended = data
+                        .time
+                        .is_some_and(|time| notifications::is_attended_hour(time.hour));
+                    let charged = data.power_source.is_external()
+                        || data.battery.reading.is_none_or(|reading| {
+                            reading.percent > config::WARNING_BATTERY_PERCENT
+                        });
+                    if !data.wifi_connected || ota_screen.is_visible() || ota_operation_active {
+                        log::debug!("Background update check skipped: busy or offline");
+                    } else if !attended {
+                        log::debug!("Background update check skipped: outside attended hours");
+                    } else if !charged {
+                        log::info!("Background update check skipped: battery too low");
+                    } else {
+                        match ota_endpoint_store.effective() {
+                            Ok(Some(endpoint)) => {
+                                if ota_service.check(endpoint.url) {
+                                    ota_operation_active = true;
+                                    log::info!("Background update check dispatched");
+                                } else {
+                                    log::warn!("OTA worker unavailable for the background check");
+                                }
+                            }
+                            Ok(None) => log::debug!("Background update check skipped: no endpoint"),
+                            Err(error) => {
+                                log::warn!("Background update check skipped: {error:#}");
+                            }
+                        }
+                    }
+                    // Re-armed here rather than on the result, so a check that
+                    // never dispatches still schedules the next one.
+                    ota_check_timer.after(config::OTA_CHECK_INTERVAL)?;
                 }
                 AppEvent::OtaConfirmationExpired => {
                     if matches!(ota_screen, ota::Screen::Available { .. }) {

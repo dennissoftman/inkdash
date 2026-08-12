@@ -200,6 +200,12 @@ impl Widget for StatusBar<'_> {
             .with_spacing(1)
             .draw(target, bounds);
 
+        if self.data.update_available {
+            // Between the network name, which is clipped to twenty characters,
+            // and the battery, which owns the last 44 pixels.
+            draw_update_badge(target, bounds.top_left + Point::new(144, 6), filled());
+        }
+
         let y = bounds.top_left.y + bounds.size.height.saturating_sub(1) as i32;
         Line::new(
             Point::new(bounds.top_left.x + 4, y),
@@ -969,6 +975,31 @@ fn draw_page_indicator(
         .draw(target)
         .ok();
     }
+}
+
+/// An arrow dropping into a tray: a background check has found a newer release.
+/// Installing it stays deliberate, with BOOT+PWR.
+fn draw_update_badge(
+    target: &mut Framebuffer,
+    top_left: Point,
+    filled: PrimitiveStyle<BinaryColor>,
+) {
+    Rectangle::new(top_left + Point::new(3, 0), Size::new(3, 5))
+        .into_styled(filled)
+        .draw(target)
+        .ok();
+    Triangle::new(
+        top_left + Point::new(0, 4),
+        top_left + Point::new(8, 4),
+        top_left + Point::new(4, 9),
+    )
+    .into_styled(filled)
+    .draw(target)
+    .ok();
+    Rectangle::new(top_left + Point::new(0, 10), Size::new(9, 2))
+        .into_styled(filled)
+        .draw(target)
+        .ok();
 }
 
 fn draw_thermometer_icon(
