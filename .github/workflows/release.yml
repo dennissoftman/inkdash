@@ -91,8 +91,25 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends --yes libudev-dev
 
+      # The prebuilt binary takes seconds; compiling it from source took 161s of
+      # the v0.1.0 release. Falls back to a source build if the archive is ever
+      # missing, so a release can never be blocked by this step.
       - name: Install espflash image tool
-        run: cargo install espflash --version 4.5.0 --locked
+        env:
+          ESPFLASH_VERSION: 4.5.0
+        run: |
+          set -euo pipefail
+          ARCHIVE=espflash-x86_64-unknown-linux-gnu.zip
+          URL="https://github.com/esp-rs/espflash/releases/download/v$ESPFLASH_VERSION/$ARCHIVE"
+          if curl -fsSL "$URL" -o "$ARCHIVE"; then
+            unzip -q -o "$ARCHIVE" -d espflash-dist
+            install -m 0755 "$(find espflash-dist -type f -name espflash | head -1)" "$HOME/.cargo/bin/espflash"
+            rm -rf espflash-dist "$ARCHIVE"
+          else
+            echo "Prebuilt archive unavailable; building from source" >&2
+            cargo install espflash --version "$ESPFLASH_VERSION" --locked
+          fi
+          espflash --version
 
       - name: Package flashable images
         shell: bash
