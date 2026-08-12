@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use esp_idf_hal::modem::Modem;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::nvs::{EspDefaultNvs, EspDefaultNvsPartition, EspNvs};
@@ -98,7 +98,7 @@ impl WifiManager {
     }
 
     pub fn status(&self) -> Result<WifiStatus> {
-        let configured_ssid = self.load()?.map(|credentials| credentials.ssid);
+        let configured_ssid = self.load_ssid()?;
         let connected = self.wifi.is_connected().unwrap_or(false);
         let signal_dbm = self.signal_dbm(connected);
         let ip = if connected {
@@ -201,16 +201,27 @@ impl WifiManager {
         }
     }
 
-    fn load(&self) -> Result<Option<WifiCredentials>> {
-        let Some(ssid_length) = self.storage.str_len(SSID_KEY)? else {
+    /// Reads only the SSID. Status is polled every minute, and the password has
+    /// no business being copied into memory that often.
+    fn load_ssid(&self) -> Result<Option<String>> {
+        let Some(length) = self.storage.str_len(SSID_KEY)? else {
             return Ok(None);
         };
-        let mut ssid_buffer = vec![0_u8; ssid_length];
-        let ssid = self
+        // 32 bytes plus the stored NUL is the longest an SSID can be.
+        let mut buffer = [0_u8; 33];
+        if length > buffer.len() {
+            bail!("saved Wi-Fi SSID is longer than 32 bytes");
+        }
+        Ok(self
             .storage
-            .get_str(SSID_KEY, &mut ssid_buffer)?
-            .context("Wi-Fi SSID disappeared from NVS")?
-            .to_owned();
+            .get_str(SSID_KEY, &mut buffer[..length])?
+            .map(str::to_owned))
+    }
+
+    fn load(&self) -> Result<Option<WifiCredentials>> {
+        let Some(ssid) = self.load_ssid()? else {
+            return Ok(None);
+        };
 
         let password = if let Some(password_length) = self.storage.str_len(PASSWORD_KEY)? {
             let mut password_buffer = vec![0_u8; password_length];
