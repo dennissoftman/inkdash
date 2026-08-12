@@ -180,12 +180,15 @@ pub fn fetch_weather(location: &Location) -> Result<Weather> {
     const TOMORROW_START: usize = 24;
     let [morning_hour, day_hour, evening_hour, night_hour] = config::TOMORROW_FORECAST_HOURS;
 
+    // `timeformat=unixtime` is not parsed at all, but Open-Meteo always returns
+    // the hourly and daily time arrays; as integers they cost roughly 700 bytes
+    // less, which keeps the response clear of `config::HTTP_RESPONSE_LIMIT`.
     let url = format!(
         "{}?latitude={:.6}&longitude={:.6}\
          &current=temperature_2m,relative_humidity_2m,weather_code\
          &hourly=temperature_2m,precipitation_probability,weather_code\
          &daily=weather_code,temperature_2m_mean,temperature_2m_min,temperature_2m_max,precipitation_probability_max,wind_speed_10m_max\
-         &forecast_days=2&timezone=auto",
+         &forecast_days=2&timezone=auto&timeformat=unixtime",
         config::WEATHER_ENDPOINT, location.latitude, location.longitude
     );
     let response: OpenMeteoResponse = get_json(&url).context("fetching Open-Meteo forecast")?;
