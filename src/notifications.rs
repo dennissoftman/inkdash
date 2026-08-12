@@ -1,14 +1,6 @@
+use crate::config;
 use crate::datetime::DateTime;
 use crate::power::PowerSource;
-
-const ALERT_START_HOUR: u8 = 10;
-const ALERT_END_HOUR: u8 = 22;
-const WARNING_THRESHOLD_PERCENT: u8 = 25;
-const CRITICAL_THRESHOLD_PERCENT: u8 = 10;
-const WARNING_CLEAR_PERCENT: u8 = 28;
-const CRITICAL_CLEAR_PERCENT: u8 = 12;
-const WARNING_REPEAT_MINUTES: u8 = 30;
-const CRITICAL_REPEAT_MINUTES: u8 = 5;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Notification {
@@ -19,8 +11,8 @@ pub enum Notification {
 impl Notification {
     const fn repeat_minutes(self) -> u8 {
         match self {
-            Self::ChargeSoon => WARNING_REPEAT_MINUTES,
-            Self::ChargeCritical => CRITICAL_REPEAT_MINUTES,
+            Self::ChargeSoon => config::WARNING_REPEAT_MINUTES,
+            Self::ChargeCritical => config::CRITICAL_REPEAT_MINUTES,
         }
     }
 
@@ -95,20 +87,21 @@ impl BatteryNotificationSchedule {
 }
 
 const fn is_alert_hour(hour: u8) -> bool {
-    hour >= ALERT_START_HOUR && hour < ALERT_END_HOUR
+    hour >= config::ALERT_START_HOUR && hour < config::ALERT_END_HOUR
 }
 
 const fn notification_for_percent(
     percent: u8,
     active: Option<Notification>,
 ) -> Option<Notification> {
-    if percent <= CRITICAL_THRESHOLD_PERCENT
+    if percent <= config::CRITICAL_BATTERY_PERCENT
         || (matches!(active, Some(Notification::ChargeCritical))
-            && percent <= CRITICAL_CLEAR_PERCENT)
+            && percent <= config::CRITICAL_BATTERY_CLEAR_PERCENT)
     {
         Some(Notification::ChargeCritical)
-    } else if percent <= WARNING_THRESHOLD_PERCENT
-        || (matches!(active, Some(Notification::ChargeSoon)) && percent <= WARNING_CLEAR_PERCENT)
+    } else if percent <= config::WARNING_BATTERY_PERCENT
+        || (matches!(active, Some(Notification::ChargeSoon))
+            && percent <= config::WARNING_BATTERY_CLEAR_PERCENT)
     {
         Some(Notification::ChargeSoon)
     } else {

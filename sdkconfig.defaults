@@ -11,6 +11,10 @@ CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 # crystal while idle. Automatic light sleep stays off so USB remains responsive.
 CONFIG_PM_ENABLE=y
 
+# Synchronize system time shortly after boot, then only once per day. The
+# battery-backed RTC is updated from each successful synchronization.
+CONFIG_LWIP_SNTP_UPDATE_DELAY=86400000
+
 # A newly installed OTA image gets one boot to prove that the application can
 # initialize and render. Until it confirms that state, a reboot rolls back to
 # the previous slot.

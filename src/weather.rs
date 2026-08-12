@@ -3,15 +3,11 @@ use std::sync::Arc;
 use std::thread;
 
 use anyhow::{bail, Context, Result};
-use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs};
 use serde::Deserialize;
 
+use crate::config;
 use crate::events::{AppEvent, EventSender};
-use crate::location::{get_json, IpLocationProvider, Location, LocationStore};
-
-const NVS_NAMESPACE: &str = "dashboard";
-pub const REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
-pub const FAILURE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+use crate::location::{get_json, Location};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Weather {
@@ -182,18 +178,15 @@ struct HourlyWeather {
 
 pub fn fetch_weather(location: &Location) -> Result<Weather> {
     const TOMORROW_START: usize = 24;
-    const MORNING_HOUR: usize = 8;
-    const DAY_HOUR: usize = 12;
-    const EVENING_HOUR: usize = 18;
-    const NIGHT_HOUR: usize = 23;
+    let [morning_hour, day_hour, evening_hour, night_hour] = config::TOMORROW_FORECAST_HOURS;
 
     let url = format!(
-        "https://api.open-meteo.com/v1/forecast?latitude={:.6}&longitude={:.6}\
+        "{}?latitude={:.6}&longitude={:.6}\
          &current=temperature_2m,relative_humidity_2m,weather_code\
          &hourly=temperature_2m,precipitation_probability,weather_code\
          &daily=weather_code,temperature_2m_mean,temperature_2m_min,temperature_2m_max,precipitation_probability_max,wind_speed_10m_max\
          &forecast_days=2&timezone=auto",
-        location.latitude, location.longitude
+        config::WEATHER_ENDPOINT, location.latitude, location.longitude
     );
     let response: OpenMeteoResponse = get_json(&url).context("fetching Open-Meteo forecast")?;
     let weather = Weather {
@@ -205,18 +198,18 @@ pub fn fetch_weather(location: &Location) -> Result<Weather> {
         tomorrow_periods: [
             hourly_forecast(
                 &response.hourly,
-                TOMORROW_START + MORNING_HOUR,
+                TOMORROW_START + morning_hour,
                 "tomorrow morning",
             )?,
-            hourly_forecast(&response.hourly, TOMORROW_START + DAY_HOUR, "tomorrow day")?,
+            hourly_forecast(&response.hourly, TOMORROW_START + day_hour, "tomorrow day")?,
             hourly_forecast(
                 &response.hourly,
-                TOMORROW_START + EVENING_HOUR,
+                TOMORROW_START + evening_hour,
                 "tomorrow evening",
             )?,
             hourly_forecast(
                 &response.hourly,
-                TOMORROW_START + NIGHT_HOUR,
+                TOMORROW_START + night_hour,
                 "tomorrow night",
             )?,
         ],
@@ -292,33 +285,20 @@ fn checked_temperature(value: f64, label: &str) -> Result<f32> {
 pub type WorkerUpdate = Result<Arc<Weather>, String>;
 
 pub struct WeatherService {
-    requests: SyncSender<()>,
+    requests: SyncSender<Arc<Location>>,
     latest: Option<Arc<Weather>>,
     in_flight: bool,
 }
 
 impl WeatherService {
-    pub fn start(nvs_partition: EspDefaultNvsPartition, events: EventSender) -> Result<Self> {
-        let (request_sender, request_receiver) = mpsc::sync_channel(1);
+    pub fn start(events: EventSender) -> Result<Self> {
+        let (request_sender, request_receiver) = mpsc::sync_channel::<Arc<Location>>(1);
         thread::Builder::new()
             .name("weather".into())
-            .stack_size(12 * 1024)
+            .stack_size(config::BACKGROUND_TASK_STACK_SIZE)
             .spawn(move || {
-                let storage = match EspNvs::new(nvs_partition, NVS_NAMESPACE, true) {
-                    Ok(storage) => storage,
-                    Err(error) => {
-                        let _ = events.send(AppEvent::WeatherCompleted(Err(format!(
-                            "opening location NVS: {error}"
-                        ))));
-                        return;
-                    }
-                };
-                let location_store = LocationStore::new(storage);
-                let mut provider = IpLocationProvider;
-                while request_receiver.recv().is_ok() {
-                    let update = location_store
-                        .get_location(&mut provider)
-                        .and_then(|location| fetch_weather(&location))
+                while let Ok(location) = request_receiver.recv() {
+                    let update = fetch_weather(&location)
                         .map(Arc::new)
                         .map_err(|error| format!("{error:#}"));
                     if events.send(AppEvent::WeatherCompleted(update)).is_err() {
@@ -335,16 +315,16 @@ impl WeatherService {
         })
     }
 
-    pub fn request(&mut self) -> bool {
+    pub fn request(&mut self, location: Arc<Location>) -> bool {
         if self.in_flight {
             return true;
         }
-        match self.requests.try_send(()) {
-            Ok(()) | Err(TrySendError::Full(())) => {
+        match self.requests.try_send(location) {
+            Ok(()) | Err(TrySendError::Full(_)) => {
                 self.in_flight = true;
                 true
             }
-            Err(TrySendError::Disconnected(())) => false,
+            Err(TrySendError::Disconnected(_)) => false,
         }
     }
 

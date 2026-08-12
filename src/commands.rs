@@ -8,6 +8,7 @@ use crate::audio::{
     Waveform, DEFAULT_DURATION_MS, DEFAULT_FREQUENCY_HZ, DEFAULT_VOLUME_PERCENT,
     SUPPORTED_SAMPLE_RATES,
 };
+use crate::config;
 use crate::datetime::DateTime;
 use crate::events::{AppEvent, EventSender};
 use crate::language::Language;
@@ -63,7 +64,7 @@ pub fn start_usb_console(sender: EventSender) -> Result<()> {
     let console_sender = sender.clone();
     thread::Builder::new()
         .name("usb-console".into())
-        .stack_size(4096)
+        .stack_size(config::INPUT_TASK_STACK_SIZE)
         .spawn(move || {
             let stdin = io::stdin();
             let mut input = stdin.lock();

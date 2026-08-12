@@ -1,20 +1,25 @@
-use std::time::Duration;
+use std::sync::mpsc::{self, Sender};
+use std::sync::Arc;
+use std::thread;
 
 use anyhow::{anyhow, bail, Context, Result};
 use esp_idf_svc::http::client::{Configuration, EspHttpConnection};
 use esp_idf_svc::http::Method;
-use esp_idf_svc::nvs::EspDefaultNvs;
+use esp_idf_svc::nvs::{EspDefaultNvs, EspDefaultNvsPartition, EspNvs};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
+
+use crate::config;
+use crate::events::{AppEvent, EventSender};
 
 const LATITUDE_KEY: &str = "loc_lat_e6";
 const LONGITUDE_KEY: &str = "loc_lon_e6";
 const CITY_KEY: &str = "loc_city";
 const COUNTRY_CODE_KEY: &str = "loc_cc";
-const IP_LOCATION_URL: &str =
-    "https://ipwho.is/?fields=success,latitude,longitude,city,country_code,message";
-const HTTP_RESPONSE_LIMIT: usize = 4096;
+const TIMEZONE_ID_KEY: &str = "loc_tz";
+const UTC_OFFSET_KEY: &str = "loc_utc_off";
 const LOCATION_NAME_LIMIT: usize = 96;
+const TIMEZONE_ID_LIMIT: usize = 64;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Location {
@@ -22,6 +27,8 @@ pub struct Location {
     pub longitude: f32,
     pub city: String,
     pub country_code: String,
+    pub timezone_id: String,
+    pub utc_offset_seconds: i32,
 }
 
 /// A deliberately small seam for adding a BSSID or another location provider.
@@ -38,18 +45,37 @@ struct IpLocationResponse {
     longitude: Option<f64>,
     city: Option<String>,
     country_code: Option<String>,
+    timezone: Option<IpTimezoneResponse>,
     message: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct IpTimezoneResponse {
+    id: Option<String>,
+    offset: Option<i32>,
 }
 
 impl LocationProvider for IpLocationProvider {
     fn locate(&mut self) -> Result<Location> {
-        let response: IpLocationResponse = get_json(IP_LOCATION_URL)?;
+        let separator = if config::IP_LOCATION_ENDPOINT.contains('?') {
+            '&'
+        } else {
+            '?'
+        };
+        let url = format!(
+            "{}{separator}fields=success,latitude,longitude,city,country_code,timezone.id,timezone.offset,message",
+            config::IP_LOCATION_ENDPOINT
+        );
+        let response: IpLocationResponse = get_json(&url)?;
         if !response.success {
             bail!(
                 "IP geolocation rejected the request: {}",
                 response.message.as_deref().unwrap_or("unknown error")
             );
         }
+        let timezone = response
+            .timezone
+            .context("IP geolocation response omitted timezone")?;
         let location = Location {
             latitude: response
                 .latitude
@@ -68,6 +94,14 @@ impl LocationProvider for IpLocationProvider {
                 .context("IP geolocation response omitted country code")?
                 .trim()
                 .to_ascii_uppercase(),
+            timezone_id: timezone
+                .id
+                .context("IP geolocation response omitted timezone ID")?
+                .trim()
+                .to_owned(),
+            utc_offset_seconds: timezone
+                .offset
+                .context("IP geolocation response omitted UTC offset")?,
         };
         validate(&location)?;
         Ok(location)
@@ -106,13 +140,39 @@ impl LocationStore {
         Ok(location)
     }
 
+    pub fn refresh_location<P>(&self, provider: &mut P) -> Result<Location>
+    where
+        P: LocationProvider,
+    {
+        let location = provider.locate().context("refreshing location")?;
+        self.save(&location)?;
+        log::info!(
+            "Refreshed location {}, {} ({}, UTC offset {:+})",
+            location.city,
+            location.country_code,
+            location.timezone_id,
+            location.utc_offset_seconds,
+        );
+        Ok(location)
+    }
+
     fn load(&self) -> Result<Option<Location>> {
-        let (Some(latitude), Some(longitude), Some(city), Some(country_code)) = (
+        let (
+            Some(latitude),
+            Some(longitude),
+            Some(city),
+            Some(country_code),
+            Some(timezone_id),
+            Some(utc_offset_seconds),
+        ) = (
             self.storage.get_i32(LATITUDE_KEY)?,
             self.storage.get_i32(LONGITUDE_KEY)?,
-            self.load_name(CITY_KEY)?,
-            self.load_name(COUNTRY_CODE_KEY)?,
-        ) else {
+            self.load_name(CITY_KEY, LOCATION_NAME_LIMIT)?,
+            self.load_name(COUNTRY_CODE_KEY, 3)?,
+            self.load_name(TIMEZONE_ID_KEY, TIMEZONE_ID_LIMIT)?,
+            self.storage.get_i32(UTC_OFFSET_KEY)?,
+        )
+        else {
             return Ok(None);
         };
         let location = Location {
@@ -120,6 +180,8 @@ impl LocationStore {
             longitude: longitude as f32 / 1_000_000.0,
             city,
             country_code,
+            timezone_id,
+            utc_offset_seconds,
         };
         if let Err(error) = validate(&location) {
             log::warn!("Discarding invalid saved location: {error:#}");
@@ -127,6 +189,8 @@ impl LocationStore {
             self.storage.remove(LONGITUDE_KEY)?;
             self.storage.remove(CITY_KEY)?;
             self.storage.remove(COUNTRY_CODE_KEY)?;
+            self.storage.remove(TIMEZONE_ID_KEY)?;
+            self.storage.remove(UTC_OFFSET_KEY)?;
             return Ok(None);
         }
         Ok(Some(location))
@@ -152,14 +216,20 @@ impl LocationStore {
         self.storage
             .set_str(COUNTRY_CODE_KEY, &location.country_code)
             .context("saving location country code")?;
+        self.storage
+            .set_str(TIMEZONE_ID_KEY, &location.timezone_id)
+            .context("saving location timezone")?;
+        self.storage
+            .set_i32(UTC_OFFSET_KEY, location.utc_offset_seconds)
+            .context("saving location UTC offset")?;
         Ok(())
     }
 
-    fn load_name(&self, key: &str) -> Result<Option<String>> {
+    fn load_name(&self, key: &str, limit: usize) -> Result<Option<String>> {
         let Some(length) = self.storage.str_len(key)? else {
             return Ok(None);
         };
-        if length <= 1 || length > LOCATION_NAME_LIMIT + 1 {
+        if length <= 1 || length > limit + 1 {
             log::warn!("Discarding invalid saved location name in {key}");
             self.storage.remove(key)?;
             return Ok(None);
@@ -185,8 +255,14 @@ fn validate(location: &Location) -> Result<()> {
             .country_code
             .bytes()
             .all(|byte| byte.is_ascii_alphabetic())
+        || location.timezone_id.trim().is_empty()
+        || location.timezone_id.len() > TIMEZONE_ID_LIMIT
+        || location.timezone_id.contains('\0')
+        || !(-18 * 60 * 60..=18 * 60 * 60).contains(&location.utc_offset_seconds)
     {
-        return Err(anyhow!("location city or country code is invalid"));
+        return Err(anyhow!(
+            "location city, country code, timezone, or UTC offset is invalid"
+        ));
     }
     Ok(())
 }
@@ -197,7 +273,7 @@ where
 {
     let configuration = Configuration {
         buffer_size: Some(1024),
-        timeout: Some(Duration::from_secs(15)),
+        timeout: Some(config::HTTP_TIMEOUT),
         crt_bundle_attach: Some(esp_idf_svc::sys::esp_crt_bundle_attach),
         ..Default::default()
     };
@@ -220,10 +296,92 @@ where
         if count == 0 {
             break;
         }
-        if body.len() + count > HTTP_RESPONSE_LIMIT {
-            bail!("HTTP response exceeded {HTTP_RESPONSE_LIMIT} bytes");
+        if body.len() + count > config::HTTP_RESPONSE_LIMIT {
+            bail!(
+                "HTTP response exceeded {} bytes",
+                config::HTTP_RESPONSE_LIMIT
+            );
         }
         body.extend_from_slice(&chunk[..count]);
     }
     serde_json::from_slice(&body).context("decoding JSON response")
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Request {
+    Cached,
+    Refresh,
+}
+
+pub type WorkerUpdate = Result<Arc<Location>, String>;
+
+pub struct LocationService {
+    requests: Sender<Request>,
+    latest: Option<Arc<Location>>,
+}
+
+impl LocationService {
+    pub fn start(nvs_partition: EspDefaultNvsPartition, events: EventSender) -> Result<Self> {
+        let (request_sender, request_receiver) = mpsc::channel();
+        thread::Builder::new()
+            .name("location".into())
+            .stack_size(config::BACKGROUND_TASK_STACK_SIZE)
+            .spawn(move || {
+                let storage = match EspNvs::new(nvs_partition, config::NVS_NAMESPACE, true) {
+                    Ok(storage) => storage,
+                    Err(error) => {
+                        let _ = events.send(AppEvent::LocationCompleted(Err(format!(
+                            "opening location NVS: {error}"
+                        ))));
+                        return;
+                    }
+                };
+                let location_store = LocationStore::new(storage);
+                let mut provider = IpLocationProvider;
+                while let Ok(request) = request_receiver.recv() {
+                    let update = match request {
+                        Request::Cached => location_store.get_location(&mut provider),
+                        Request::Refresh => location_store.refresh_location(&mut provider),
+                    }
+                    .map(Arc::new)
+                    .map_err(|error| format!("{error:#}"));
+                    if events.send(AppEvent::LocationCompleted(update)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .context("starting location worker")?;
+
+        Ok(Self {
+            requests: request_sender,
+            latest: None,
+        })
+    }
+
+    pub fn request(&self) -> bool {
+        self.send(Request::Cached)
+    }
+
+    pub fn refresh(&self) -> bool {
+        self.send(Request::Refresh)
+    }
+
+    fn send(&self, request: Request) -> bool {
+        self.requests.send(request).is_ok()
+    }
+
+    pub fn complete(&mut self, update: WorkerUpdate) {
+        match update {
+            Ok(location) => {
+                self.latest = Some(location);
+            }
+            Err(error) => {
+                log::warn!("Location update failed; retaining last location: {error}");
+            }
+        }
+    }
+
+    pub fn latest(&self) -> Option<Arc<Location>> {
+        self.latest.clone()
+    }
 }

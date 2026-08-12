@@ -2,6 +2,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use crate::buttons::ButtonEvent;
 use crate::commands::CommandMessage;
+use crate::location::WorkerUpdate as LocationWorkerUpdate;
 use crate::notifications::Notification;
 use crate::ota::WorkerEvent as OtaWorkerEvent;
 use crate::weather::WorkerUpdate;
@@ -15,9 +16,11 @@ pub enum AppEvent {
     ClockDue,
     WeatherDue,
     WeatherCompleted(WorkerUpdate),
+    LocationCompleted(LocationWorkerUpdate),
     Notification(Notification),
     WifiChanged,
     ReconnectDue,
+    NtpSynchronized,
     Ota(OtaWorkerEvent),
     OtaConfirmationExpired,
     OtaRestartDue,

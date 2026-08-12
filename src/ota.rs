@@ -2,7 +2,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use esp_idf_svc::http::client::{Configuration, EspHttpConnection, FollowRedirectsPolicy};
@@ -13,10 +12,10 @@ use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+use crate::config;
 use crate::events::{AppEvent, EventSender};
 
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-const NVS_NAMESPACE: &str = "dashboard";
 const ENDPOINT_KEY: &str = "ota_endpoint";
 const ENDPOINT_LENGTH_LIMIT: usize = 512;
 const MANIFEST_RESPONSE_LIMIT: usize = 4096;
@@ -125,7 +124,7 @@ pub struct EndpointStore {
 
 impl EndpointStore {
     pub fn new(partition: EspDefaultNvsPartition) -> Result<Self> {
-        let storage = EspNvs::new(partition, NVS_NAMESPACE, true)
+        let storage = EspNvs::new(partition, config::NVS_NAMESPACE, true)
             .context("opening OTA endpoint settings NVS")?;
         Ok(Self { storage })
     }
@@ -291,7 +290,7 @@ fn install_update(update: &UpdateInfo, events: &EventSender, cancel: &AtomicBool
 
     let configuration = Configuration {
         buffer_size: Some(DOWNLOAD_BUFFER_SIZE),
-        timeout: Some(Duration::from_secs(5)),
+        timeout: Some(config::OTA_DOWNLOAD_TIMEOUT),
         follow_redirects_policy: FollowRedirectsPolicy::FollowGetHead,
         crt_bundle_attach: Some(sys::esp_crt_bundle_attach),
         ..Default::default()
@@ -457,7 +456,7 @@ pub fn restart() -> ! {
 fn get_manifest_json(url: &str) -> Result<UpdateManifest> {
     let configuration = Configuration {
         buffer_size: Some(2048),
-        timeout: Some(Duration::from_secs(15)),
+        timeout: Some(config::OTA_MANIFEST_TIMEOUT),
         follow_redirects_policy: FollowRedirectsPolicy::FollowGetHead,
         crt_bundle_attach: Some(sys::esp_crt_bundle_attach),
         ..Default::default()

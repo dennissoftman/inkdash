@@ -14,6 +14,28 @@ pub struct DateTime {
 }
 
 impl DateTime {
+    pub fn from_unix_seconds(unix_seconds: u64, utc_offset_seconds: i32) -> Result<Self> {
+        const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
+
+        let unix_seconds = i64::try_from(unix_seconds).context("Unix timestamp is too large")?;
+        let local_seconds = unix_seconds
+            .checked_add(i64::from(utc_offset_seconds))
+            .context("local timestamp is outside the supported range")?;
+        let days = local_seconds.div_euclid(SECONDS_PER_DAY);
+        let seconds_of_day = local_seconds.rem_euclid(SECONDS_PER_DAY);
+        let (year, month, day) = civil_date_from_unix_days(days);
+        let value = Self {
+            year: u16::try_from(year).context("local year is outside the supported range")?,
+            month,
+            day,
+            hour: (seconds_of_day / 3600) as u8,
+            minute: ((seconds_of_day % 3600) / 60) as u8,
+            second: (seconds_of_day % 60) as u8,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
     pub fn parse(value: &str) -> Result<Self> {
         let normalized = value.trim().replace('T', " ");
         let (date, time) = normalized
@@ -75,6 +97,24 @@ impl DateTime {
     pub fn short_date(&self, language: Language) -> String {
         language.short_date(self.weekday(), self.day, self.month)
     }
+}
+
+/// Gregorian civil date conversion for days relative to 1970-01-01.
+fn civil_date_from_unix_days(days: i64) -> (i64, u8, u8) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+    (year, month as u8, day as u8)
 }
 
 impl fmt::Display for DateTime {

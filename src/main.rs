@@ -3,6 +3,7 @@ mod battery;
 mod board;
 mod buttons;
 mod commands;
+mod config;
 mod dashboard;
 mod datetime;
 mod epaper;
@@ -12,6 +13,7 @@ mod ink_stacks;
 mod language;
 mod location;
 mod notifications;
+mod ntp;
 mod ota;
 mod power;
 mod rtc;
@@ -22,6 +24,7 @@ mod wifi;
 use std::borrow::Borrow;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use audio::Audio;
@@ -38,7 +41,7 @@ use esp_idf_hal::adc::{attenuation, AdcChannel};
 use esp_idf_hal::delay::FreeRtos;
 use esp_idf_hal::gpio::{AnyInputPin, PinDriver, Pull};
 use esp_idf_hal::peripherals::Peripherals;
-use esp_idf_hal::spi::{config, Dma, SpiDeviceDriver, SpiDriverConfig};
+use esp_idf_hal::spi::{config as spi_config, Dma, SpiDeviceDriver, SpiDriverConfig};
 use esp_idf_hal::units::FromValueType;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::log::EspLogger;
@@ -50,14 +53,12 @@ use events::AppEvent;
 use i2c_bus::I2cBus;
 use ink_stacks::Framebuffer;
 use language::{Language, LanguageStore};
+use location::LocationService;
 use notifications::BatteryNotificationSchedule;
 use rtc::Rtc;
 use shtc3::Shtc3;
-use weather::{WeatherService, FAILURE_RETRY_INTERVAL, REFRESH_INTERVAL};
+use weather::WeatherService;
 use wifi::{WifiCredentials, WifiManager};
-
-const FULL_REFRESH_AFTER_PARTIALS: u8 = 30;
-const RECONNECT_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 struct CommandSettings<'a> {
     language: &'a LanguageStore,
@@ -118,7 +119,7 @@ fn main() -> Result<()> {
     let battery_channel = AdcChannelDriver::new(adc, pins.gpio4, &adc_config)?;
     let mut battery = Battery::new(battery_channel);
 
-    let spi_config = config::Config::new()
+    let spi_config = spi_config::Config::new()
         .baudrate(20.MHz().into())
         .write_only(true);
     let spi_driver_config = SpiDriverConfig::new().dma(Dma::Auto(FRAMEBUFFER_SIZE));
@@ -191,13 +192,18 @@ fn main() -> Result<()> {
         let _ = ota_restart_sender.send(AppEvent::OtaRestartDue);
     })?;
 
-    let mut weather = WeatherService::start(nvs.clone(), event_sender.clone())?;
+    let mut location = LocationService::start(nvs.clone(), event_sender.clone())?;
+    let mut weather = WeatherService::start(event_sender.clone())?;
     let ota_service = ota::Service::start(event_sender.clone())?;
     let mut wifi = WifiManager::new(peripherals.modem, system_loop, nvs)?;
     match wifi.connect_saved() {
         Ok(true) => log::info!("Connected using saved Wi-Fi credentials"),
         Ok(false) => log::info!("No saved Wi-Fi; configure it over USB"),
         Err(error) => log::warn!("Saved Wi-Fi connection failed: {error:#}"),
+    }
+    let _ntp_service = ntp::start(event_sender.clone())?;
+    if wifi.is_connected() {
+        location.request();
     }
 
     commands::start_usb_console(event_sender.clone())?;
@@ -217,6 +223,7 @@ fn main() -> Result<()> {
     let mut pending_update: Option<ota::UpdateInfo> = None;
     let mut ota_operation_active = false;
     let mut running_image_confirmation_checked = false;
+    let mut system_time_synchronized = false;
     // The USB SOF monitor has had time to settle during peripheral setup.
     power_policy.refresh()?;
     let mut data = collect_dashboard_data(
@@ -231,7 +238,7 @@ fn main() -> Result<()> {
     let mut battery_notifications = BatteryNotificationSchedule::new();
     queue_battery_notification(&mut battery_notifications, &data, &event_sender);
     schedule_clock(&clock_timer, data.time)?;
-    weather_timer.after(Duration::from_millis(1))?;
+    weather_timer.after(config::IMMEDIATE_EVENT_DELAY)?;
 
     loop {
         if render_requested && !audio.is_pcm_active() {
@@ -239,7 +246,7 @@ fn main() -> Result<()> {
             let changed = displayed_frame.changed_regions(&next_frame);
             let needs_full = force_full_refresh
                 || !panel_initialized
-                || partial_refreshes >= FULL_REFRESH_AFTER_PARTIALS;
+                || partial_refreshes >= config::FULL_REFRESH_AFTER_PARTIALS;
             let refresh_result = match (needs_full, changed.as_slice()) {
                 (true, _) => epaper
                     .init_full()
@@ -391,7 +398,7 @@ fn main() -> Result<()> {
                                     message: "OTA worker is unavailable".into(),
                                 };
                                 if data.wifi_connected {
-                                    weather_timer.after(Duration::from_millis(1))?;
+                                    weather_timer.after(config::IMMEDIATE_EVENT_DELAY)?;
                                 }
                             } else {
                                 ota_operation_active = true;
@@ -420,7 +427,7 @@ fn main() -> Result<()> {
                         render_requested = true;
                         force_full_refresh = true;
                         if data.wifi_connected {
-                            weather_timer.after(Duration::from_millis(1))?;
+                            weather_timer.after(config::IMMEDIATE_EVENT_DELAY)?;
                         }
                     }
                     ButtonEvent::Power => {
@@ -479,10 +486,18 @@ fn main() -> Result<()> {
                     render_requested = true;
                 }
                 AppEvent::WeatherDue => {
-                    if wifi.is_connected() && weather.request() {
-                        log::debug!("Weather refresh dispatched");
+                    if !wifi.is_connected() {
+                        weather_timer.after(config::WEATHER_RETRY_INTERVAL)?;
+                    } else if let Some(current_location) = location.latest() {
+                        if weather.request(current_location) {
+                            log::debug!("Weather refresh dispatched");
+                        } else {
+                            weather_timer.after(config::WEATHER_RETRY_INTERVAL)?;
+                        }
+                    } else if location.request() {
+                        log::debug!("Location lookup dispatched before weather refresh");
                     } else {
-                        weather_timer.after(FAILURE_RETRY_INTERVAL)?;
+                        weather_timer.after(config::WEATHER_RETRY_INTERVAL)?;
                     }
                 }
                 AppEvent::WeatherCompleted(update) => {
@@ -492,10 +507,46 @@ fn main() -> Result<()> {
                         render_requested = true;
                     }
                     weather_timer.after(if succeeded {
-                        REFRESH_INTERVAL
+                        config::WEATHER_REFRESH_INTERVAL
                     } else {
-                        FAILURE_RETRY_INTERVAL
+                        config::WEATHER_RETRY_INTERVAL
                     })?;
+                }
+                AppEvent::LocationCompleted(update) => {
+                    let previous_utc_offset = location
+                        .latest()
+                        .map(|location| location.utc_offset_seconds);
+                    let succeeded = update.is_ok();
+                    location.complete(update);
+                    let current_location = location.latest();
+                    let changed_utc_offset = current_location
+                        .as_ref()
+                        .map(|location| location.utc_offset_seconds)
+                        .filter(|offset| {
+                            system_time_synchronized && Some(*offset) != previous_utc_offset
+                        });
+                    if let Some(utc_offset_seconds) = changed_utc_offset {
+                        let rtc_updated =
+                            synchronize_rtc_from_system_time(&rtc, &mut i2c, utc_offset_seconds);
+                        if rtc_updated {
+                            refresh_dashboard_data(
+                                &mut data,
+                                &rtc,
+                                &climate_sensor,
+                                &mut i2c,
+                                &mut battery,
+                                &wifi,
+                                weather.latest(),
+                            );
+                            schedule_clock(&clock_timer, data.time)?;
+                            render_requested = true;
+                        }
+                    }
+                    if succeeded && current_location.is_some() && wifi.is_connected() {
+                        weather_timer.after(config::IMMEDIATE_EVENT_DELAY)?;
+                    } else if current_location.is_none() {
+                        weather_timer.after(config::WEATHER_RETRY_INTERVAL)?;
+                    }
                 }
                 AppEvent::Notification(notification) => {
                     if ota_screen.is_visible() {
@@ -527,20 +578,52 @@ fn main() -> Result<()> {
                     if wifi.is_connected() {
                         reconnect_timer.cancel()?;
                         if !was_connected {
-                            weather_timer.after(Duration::from_millis(1))?;
+                            weather_timer.after(config::IMMEDIATE_EVENT_DELAY)?;
                         }
                     } else {
-                        reconnect_timer.after(RECONNECT_INTERVAL)?;
+                        reconnect_timer.after(config::WIFI_RECONNECT_INTERVAL)?;
                     }
                 }
                 AppEvent::ReconnectDue => match wifi.reconnect_saved() {
-                    Ok(true) => reconnect_timer.after(RECONNECT_INTERVAL)?,
+                    Ok(true) => reconnect_timer.after(config::WIFI_RECONNECT_INTERVAL)?,
                     Ok(false) => {}
                     Err(error) => {
                         log::warn!("Wi-Fi reconnect failed: {error:#}");
-                        reconnect_timer.after(RECONNECT_INTERVAL)?;
+                        reconnect_timer.after(config::WIFI_RECONNECT_INTERVAL)?;
                     }
                 },
+                AppEvent::NtpSynchronized => {
+                    system_time_synchronized = true;
+                    if let Some(utc_offset_seconds) = location
+                        .latest()
+                        .map(|location| location.utc_offset_seconds)
+                    {
+                        if synchronize_rtc_from_system_time(&rtc, &mut i2c, utc_offset_seconds) {
+                            refresh_dashboard_data(
+                                &mut data,
+                                &rtc,
+                                &climate_sensor,
+                                &mut i2c,
+                                &mut battery,
+                                &wifi,
+                                weather.latest(),
+                            );
+                            schedule_clock(&clock_timer, data.time)?;
+                            render_requested = true;
+                        }
+                    } else {
+                        log::info!(
+                            "NTP synchronized system time; waiting for location timezone before updating RTC"
+                        );
+                    }
+                    if location.latest().is_some() {
+                        if !location.refresh() {
+                            log::warn!("Location worker is unavailable for timezone refresh");
+                        }
+                    } else if !location.request() {
+                        log::warn!("Location worker is unavailable for timezone lookup");
+                    }
+                }
                 AppEvent::Ota(update) => {
                     match update {
                         ota::WorkerEvent::Checked(Ok(ota::CheckResult::UpToDate))
@@ -549,7 +632,7 @@ fn main() -> Result<()> {
                             ota_operation_active = false;
                             ota_screen = ota::Screen::UpToDate;
                             if data.wifi_connected {
-                                weather_timer.after(Duration::from_millis(1))?;
+                                weather_timer.after(config::IMMEDIATE_EVENT_DELAY)?;
                             }
                         }
                         ota::WorkerEvent::Checked(Ok(ota::CheckResult::Available(update)))
@@ -561,7 +644,7 @@ fn main() -> Result<()> {
                                 size: update.size,
                             };
                             pending_update = Some(update);
-                            ota_confirmation_timer.after(Duration::from_secs(60))?;
+                            ota_confirmation_timer.after(config::OTA_CONFIRMATION_TIMEOUT)?;
                         }
                         ota::WorkerEvent::Checked(Err(error))
                             if matches!(ota_screen, ota::Screen::Checking) =>
@@ -569,7 +652,7 @@ fn main() -> Result<()> {
                             ota_operation_active = false;
                             ota_screen = ota::Screen::Failed { message: error };
                             if data.wifi_connected {
-                                weather_timer.after(Duration::from_millis(1))?;
+                                weather_timer.after(config::IMMEDIATE_EVENT_DELAY)?;
                             }
                         }
                         ota::WorkerEvent::Checked(_) => {
@@ -590,19 +673,19 @@ fn main() -> Result<()> {
                             ota_operation_active = false;
                             ota_screen = ota::Screen::Restarting { version };
                             force_full_refresh = true;
-                            ota_restart_timer.after(Duration::from_secs(3))?;
+                            ota_restart_timer.after(config::OTA_RESTART_DELAY)?;
                         }
                         ota::WorkerEvent::InstallFailed(error) if ota_screen.is_visible() => {
                             ota_operation_active = false;
                             ota_screen = ota::Screen::Failed { message: error };
                             if data.wifi_connected {
-                                weather_timer.after(Duration::from_millis(1))?;
+                                weather_timer.after(config::IMMEDIATE_EVENT_DELAY)?;
                             }
                         }
                         ota::WorkerEvent::InstallFailed(_) => {
                             ota_operation_active = false;
                             if data.wifi_connected {
-                                weather_timer.after(Duration::from_millis(1))?;
+                                weather_timer.after(config::IMMEDIATE_EVENT_DELAY)?;
                             }
                         }
                         ota::WorkerEvent::Cancelled => {
@@ -612,7 +695,7 @@ fn main() -> Result<()> {
                                 force_full_refresh = true;
                             }
                             if data.wifi_connected {
-                                weather_timer.after(Duration::from_millis(1))?;
+                                weather_timer.after(config::IMMEDIATE_EVENT_DELAY)?;
                             }
                         }
                         _ => {}
@@ -626,7 +709,7 @@ fn main() -> Result<()> {
                         render_requested = true;
                         force_full_refresh = true;
                         if data.wifi_connected {
-                            weather_timer.after(Duration::from_millis(1))?;
+                            weather_timer.after(config::IMMEDIATE_EVENT_DELAY)?;
                         }
                     }
                 }
@@ -636,6 +719,33 @@ fn main() -> Result<()> {
                     }
                 }
             }
+        }
+    }
+}
+
+fn synchronize_rtc_from_system_time(
+    rtc: &Rtc,
+    i2c: &mut I2cBus<'_>,
+    utc_offset_seconds: i32,
+) -> bool {
+    let result = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(anyhow::Error::from)
+        .and_then(|elapsed| {
+            datetime::DateTime::from_unix_seconds(elapsed.as_secs(), utc_offset_seconds)
+        })
+        .and_then(|value| {
+            rtc.set(i2c, value)?;
+            Ok(value)
+        });
+    match result {
+        Ok(value) => {
+            log::info!("RTC synchronized from NTP: {value}");
+            true
+        }
+        Err(error) => {
+            log::warn!("Updating RTC from NTP failed: {error:#}");
+            false
         }
     }
 }
@@ -654,7 +764,7 @@ fn queue_battery_notification(
 fn schedule_clock(timer: &EspTimer<'_>, time: Option<datetime::DateTime>) -> Result<()> {
     let delay = time
         .map(|value| Duration::from_secs(u64::from(60_u8 - value.second)))
-        .unwrap_or_else(|| Duration::from_secs(5));
+        .unwrap_or(config::CLOCK_RETRY_INTERVAL);
     timer.after(delay)?;
     Ok(())
 }

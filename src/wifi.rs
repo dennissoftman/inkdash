@@ -5,7 +5,8 @@ use esp_idf_svc::nvs::{EspDefaultNvs, EspDefaultNvsPartition, EspNvs};
 use esp_idf_svc::sys::{self, EspError};
 use esp_idf_svc::wifi::{AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi};
 
-const NVS_NAMESPACE: &str = "dashboard";
+use crate::config;
+
 const SSID_KEY: &str = "wifi_ssid";
 const PASSWORD_KEY: &str = "wifi_pass";
 
@@ -42,7 +43,7 @@ impl WifiManager {
         system_loop: EspSystemEventLoop,
         nvs_partition: EspDefaultNvsPartition,
     ) -> Result<Self> {
-        let storage = EspNvs::new(nvs_partition.clone(), NVS_NAMESPACE, true)
+        let storage = EspNvs::new(nvs_partition.clone(), config::NVS_NAMESPACE, true)
             .context("opening dashboard NVS")?;
         let wifi = BlockingWifi::wrap(
             EspWifi::new(modem, system_loop.clone(), Some(nvs_partition))?,

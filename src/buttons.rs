@@ -1,17 +1,14 @@
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use esp_idf_hal::delay::FreeRtos;
 use esp_idf_hal::gpio::{Gpio0, Gpio18, Input, PinDriver, Pull};
 use esp_idf_hal::task::block_on;
 
+use crate::config;
 use crate::events::{AppEvent, EventSender};
-
-const DEBOUNCE_MS: u32 = 30;
-const BUTTON_TASK_STACK_SIZE: usize = 4096;
-const BOTH_BUTTONS_LONG_PRESS: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ButtonEvent {
@@ -43,17 +40,17 @@ pub fn start(
     let power_sender = raw_sender.clone();
     thread::Builder::new()
         .name("button-boot".into())
-        .stack_size(BUTTON_TASK_STACK_SIZE)
+        .stack_size(config::INPUT_TASK_STACK_SIZE)
         .spawn(move || button_loop(boot, ButtonId::Boot, raw_sender))
         .context("starting BOOT interrupt task")?;
     thread::Builder::new()
         .name("button-power".into())
-        .stack_size(BUTTON_TASK_STACK_SIZE)
+        .stack_size(config::INPUT_TASK_STACK_SIZE)
         .spawn(move || button_loop(power, ButtonId::Power, power_sender))
         .context("starting PWR interrupt task")?;
     thread::Builder::new()
         .name("button-gestures".into())
-        .stack_size(BUTTON_TASK_STACK_SIZE)
+        .stack_size(config::INPUT_TASK_STACK_SIZE)
         .spawn(move || gesture_loop(raw_events, sender))
         .context("starting button gesture task")?;
     Ok(())
@@ -71,7 +68,7 @@ fn button_loop(
         }
         // A one-shot settle delay is only armed after a GPIO edge. It consumes
         // no CPU between presses and avoids turning switch bounce into events.
-        FreeRtos::delay_ms(DEBOUNCE_MS);
+        FreeRtos::delay_ms(config::BUTTON_DEBOUNCE_MS);
         if pin.is_low() {
             if sender.send(RawButtonEvent::Pressed(button)).is_err() {
                 return;
@@ -82,7 +79,7 @@ fn button_loop(
         if block_on(pin.wait_for_rising_edge()).is_err() {
             return;
         }
-        FreeRtos::delay_ms(DEBOUNCE_MS);
+        FreeRtos::delay_ms(config::BUTTON_DEBOUNCE_MS);
         if sender.send(RawButtonEvent::Released(button)).is_err() {
             return;
         }
@@ -98,7 +95,7 @@ fn gesture_loop(events: mpsc::Receiver<RawButtonEvent>, sender: EventSender) {
     loop {
         let event = match chord_started.filter(|_| !chord_consumed) {
             Some(started) => {
-                let remaining = BOTH_BUTTONS_LONG_PRESS.saturating_sub(started.elapsed());
+                let remaining = config::BUTTON_LONG_PRESS.saturating_sub(started.elapsed());
                 match events.recv_timeout(remaining) {
                     Ok(event) => Some(event),
                     Err(RecvTimeoutError::Timeout) => {

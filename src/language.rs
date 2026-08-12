@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use esp_idf_svc::nvs::{EspDefaultNvs, EspDefaultNvsPartition, EspNvs};
 
-const NVS_NAMESPACE: &str = "dashboard";
+use crate::config;
+
 const LANGUAGE_KEY: &str = "ui_lang";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -152,8 +153,8 @@ pub struct LanguageStore {
 
 impl LanguageStore {
     pub fn new(partition: EspDefaultNvsPartition) -> Result<Self> {
-        let storage =
-            EspNvs::new(partition, NVS_NAMESPACE, true).context("opening language settings NVS")?;
+        let storage = EspNvs::new(partition, config::NVS_NAMESPACE, true)
+            .context("opening language settings NVS")?;
         Ok(Self { storage })
     }
 

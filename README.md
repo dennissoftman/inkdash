@@ -84,13 +84,17 @@ HELP
 
 Successful commands begin with `OK`; malformed commands and hardware/network
 failures begin with `ERR`. The RTC stores local wall-clock time and has no
-timezone field. Wi-Fi credentials persist in the default ESP-IDF NVS partition.
-They are not printed back by any command.
+timezone field. After Wi-Fi comes up, SNTP synchronizes it on boot and once per
+day. The location-derived UTC offset keeps the hardware clock in local time and
+also applies daylight-saving changes. Wi-Fi credentials persist in the default
+ESP-IDF NVS partition. They are not printed back by any command.
 
-After Wi-Fi connects, the firmware determines its approximate coordinates,
-city, and country code once using `ipwho.is` and saves them in NVS. Later boots
-reuse the complete location. Firmware upgrading from the old coordinate-only
-cache refreshes the location once to add the display name.
+After Wi-Fi connects, the background location service determines approximate
+coordinates, city, country code, IANA timezone, and current UTC offset using
+`ipwho.is`, then saves the result in NVS. Weather and NTP both consume this
+shared location value. Later boots reuse the cache, while each daily NTP sync
+refreshes it so timezone/DST offsets stay current. Firmware upgrading from an
+older partial cache automatically refreshes it.
 Open-Meteo weather is fetched on boot and then on a dedicated worker thread
 every hour, so HTTPS requests never block input or dashboard rendering. The
 response includes current conditions, today's daily aggregates, and tomorrow's
@@ -173,6 +177,7 @@ console and automatically returning to ordinary commands after playback.
 | `src/board.rs` | board peripheral power-rail control |
 | `src/buttons.rs` | debounced BOOT/PWR page navigation |
 | `src/commands.rs` | USB command parsing and input thread |
+| `src/config.rs` | centralized operational policy and build-time overrides |
 | `src/events.rs` | central application event types and blocking queue |
 | `src/datetime.rs` | validated date/time representation and parsing |
 | `src/rtc.rs` | PCF85063 BCD register protocol |
@@ -180,8 +185,9 @@ console and automatically returning to ordinary commands after playback.
 | `src/battery.rs` | calibrated ADC sampling and approximate LiPo percentage |
 | `src/audio.rs` | ES8311 setup and temporary I2S tone playback |
 | `src/wifi.rs` | station-mode connection and NVS credential storage |
-| `src/location.rs` | cached coordinates and pluggable IP geolocation provider |
-| `src/weather.rs` | current/daily/hourly Open-Meteo data and background refresh scheduling |
+| `src/ntp.rs` | boot-time and daily SNTP synchronization events |
+| `src/location.rs` | reusable background location/timezone service and NVS cache |
+| `src/weather.rs` | location-agnostic Open-Meteo fetching and background refresh scheduling |
 | `src/ink_stacks.rs` | 1-bit framebuffer plus fixed/fill row and column layout |
 | `src/language.rs` | persistent language setting and extensible UI translation tables |
 | `src/notifications.rs` | semantic battery-alert scheduling and quiet-hour policy |
@@ -276,6 +282,41 @@ Actions supplies a stable latest-release manifest URL automatically:
 ```sh
 OTA_ENDPOINT=https://example.com/device/ota-manifest.json cargo build --release
 ```
+
+Operational defaults are centralized in `src/config.rs`. The main network and
+timing policies can be overridden through build environment variables:
+
+| Variable | Default |
+| --- | --- |
+| `IP_LOCATION_ENDPOINT` | `https://ipwho.is/` |
+| `WEATHER_ENDPOINT` | `https://api.open-meteo.com/v1/forecast` |
+| `NTP_SERVER` | `0.pool.ntp.org` |
+| `WEATHER_REFRESH_SECONDS` | `3600` |
+| `WEATHER_RETRY_SECONDS` | `300` |
+| `WIFI_RECONNECT_SECONDS` | `300` |
+| `FULL_REFRESH_AFTER_PARTIALS` | `30` |
+| `HTTP_TIMEOUT_SECONDS` / `HTTP_RESPONSE_LIMIT_BYTES` | `15` / `4096` |
+| `BACKGROUND_TASK_STACK_SIZE` | `12288` |
+| `INPUT_TASK_STACK_SIZE` | `4096` |
+| `BUTTON_DEBOUNCE_MS` / `BUTTON_LONG_PRESS_SECONDS` | `30` / `2` |
+| `OTA_CONFIRMATION_SECONDS` / `OTA_RESTART_SECONDS` | `60` / `3` |
+| `OTA_MANIFEST_TIMEOUT_SECONDS` / `OTA_DOWNLOAD_TIMEOUT_SECONDS` | `15` / `5` |
+| `BATTERY_ALERT_START_HOUR` / `BATTERY_ALERT_END_HOUR` | `10` / `22` |
+| `BATTERY_WARNING_PERCENT` / `BATTERY_CRITICAL_PERCENT` | `25` / `10` |
+| `BATTERY_WARNING_CLEAR_PERCENT` / `BATTERY_CRITICAL_CLEAR_PERCENT` | `28` / `12` |
+| `BATTERY_WARNING_REPEAT_MINUTES` / `BATTERY_CRITICAL_REPEAT_MINUTES` | `30` / `5` |
+
+For example:
+
+```sh
+NTP_SERVER=ntp.internal.example WEATHER_REFRESH_SECONDS=7200 cargo build --release
+```
+
+The daily SNTP polling interval remains an ESP-IDF setting in
+`sdkconfig.defaults` (`CONFIG_LWIP_SNTP_UPDATE_DELAY=86400000`). Board wiring,
+device addresses, display waveforms, and widget geometry stay close to their
+drivers because changing them describes different hardware or layout rather
+than deployment policy.
 
 ## Firmware updates and releases
 
