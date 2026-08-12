@@ -43,3 +43,20 @@ jobs:
 
       - name: Build release firmware
         run: cargo build --locked --release
+
+  # The artwork preview shares the firmware's modules, so it breaks whenever they
+  # change shape. It needs no Xtensa toolchain: `+stable` overrides the esp
+  # channel in rust-toolchain.toml and ignores the build-std setting in
+  # .cargo/config.toml, and the explicit target overrides the board target there.
+  preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Build the clock artwork preview
+        run: |
+          cargo +stable build --locked \
+            --manifest-path tools/backdrop-preview/Cargo.toml \
+            --target "$(rustc +stable -vV | sed -n 's/^host: //p')"
