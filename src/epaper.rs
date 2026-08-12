@@ -8,7 +8,7 @@ use esp_idf_hal::delay::FreeRtos;
 use esp_idf_hal::gpio::{Input, Output, PinDriver};
 use esp_idf_hal::spi::SpiSingleDeviceDriver;
 use esp_idf_hal::task::block_on;
-use esp_idf_svc::timer::EspTaskTimerService;
+use esp_idf_svc::timer::{EspAsyncTimer, EspTaskTimerService};
 
 pub const WIDTH: usize = 200;
 pub const HEIGHT: usize = 200;
@@ -39,6 +39,9 @@ pub struct Epaper<'d> {
     busy: PinDriver<'d, Input>,
     reset: PinDriver<'d, Output>,
     dc: PinDriver<'d, Output>,
+    /// A refresh waits on BUSY a dozen times. Keeping one timer for the
+    /// driver's lifetime avoids creating and destroying an ESP timer per wait.
+    deadline: EspAsyncTimer,
 }
 
 impl<'d> Epaper<'d> {
@@ -48,14 +51,16 @@ impl<'d> Epaper<'d> {
         busy: PinDriver<'d, Input>,
         reset: PinDriver<'d, Output>,
         dc: PinDriver<'d, Output>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let deadline = EspTaskTimerService::new()?.timer_async()?;
+        Ok(Self {
             spi,
             power,
             busy,
             reset,
             dc,
-        }
+            deadline,
+        })
     }
 
     pub fn init_full(&mut self) -> Result<()> {
@@ -185,10 +190,13 @@ impl<'d> Epaper<'d> {
     }
 
     fn wait_until_idle(&mut self, timeout: Duration) -> Result<()> {
-        let timer_service = EspTaskTimerService::new()?;
-        let mut timer = timer_service.timer_async()?;
+        let Self {
+            busy: busy_pin,
+            deadline: timer,
+            ..
+        } = self;
         let ready = block_on(async {
-            let mut busy = core::pin::pin!(self.busy.wait_for_low());
+            let mut busy = core::pin::pin!(busy_pin.wait_for_low());
             let mut deadline = core::pin::pin!(timer.after(timeout));
             poll_fn(|context| {
                 if let Poll::Ready(result) = busy.as_mut().poll(context) {

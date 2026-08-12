@@ -137,7 +137,7 @@ fn main() -> Result<()> {
     reset.set_high()?;
     let mut dc = PinDriver::output(pins.gpio10)?;
     dc.set_low()?;
-    let mut epaper = Epaper::new(spi, epaper_power, busy, reset, dc);
+    let mut epaper = Epaper::new(spi, epaper_power, busy, reset, dc)?;
 
     let mut audio = Audio::new(pins.gpio46)?;
 
