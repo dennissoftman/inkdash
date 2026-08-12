@@ -38,6 +38,17 @@ jobs:
           version: 1.95.0.0
           ldproxy: true
 
+      # Shares the cache the CI workflow populates; see ci.yml for the reasoning.
+      - name: Restore ESP-IDF and its toolchains
+        id: embuild
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .embuild
+            !.embuild/espressif/dist
+          key: embuild-${{ runner.os }}-${{ hashFiles('.cargo/config.toml') }}
+          restore-keys: embuild-${{ runner.os }}-
+
       - name: Validate release version
         id: version
         shell: bash
@@ -64,6 +75,15 @@ jobs:
 
       - name: Build release firmware
         run: cargo build --locked --release
+
+      - name: Save ESP-IDF and its toolchains
+        if: success() && steps.embuild.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .embuild
+            !.embuild/espressif/dist
+          key: ${{ steps.embuild.outputs.cache-primary-key }}
 
       - name: Install native flashing dependencies
         run: |

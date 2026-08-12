@@ -35,6 +35,21 @@ jobs:
           version: 1.95.0.0
           ldproxy: true
 
+      # esp-idf-sys otherwise clones ESP-IDF and downloads its toolchains on every
+      # run, which is both the slowest step and the only one that depends on an
+      # external CDN. The `dist` archives are excluded: they are only the download
+      # staging area, and idf_tools does not need them once the tools are extracted.
+      # The key follows .cargo/config.toml, which pins ESP_IDF_VERSION.
+      - name: Restore ESP-IDF and its toolchains
+        id: embuild
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .embuild
+            !.embuild/espressif/dist
+          key: embuild-${{ runner.os }}-${{ hashFiles('.cargo/config.toml') }}
+          restore-keys: embuild-${{ runner.os }}-
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -43,6 +58,17 @@ jobs:
 
       - name: Build release firmware
         run: cargo build --locked --release
+
+      # Saved only on success, and only when the exact key was missing, so a
+      # half-finished install can never be handed to a later run.
+      - name: Save ESP-IDF and its toolchains
+        if: success() && steps.embuild.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .embuild
+            !.embuild/espressif/dist
+          key: ${{ steps.embuild.outputs.cache-primary-key }}
 
   # The artwork preview shares the firmware's modules, so it breaks whenever they
   # change shape. It needs no Xtensa toolchain: `+stable` overrides the esp
