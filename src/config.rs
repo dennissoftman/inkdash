@@ -14,6 +14,9 @@ pub const NTP_SERVER: &str = match option_env!("NTP_SERVER") {
     Some(value) => value,
     None => "0.pool.ntp.org",
 };
+/// Settings live in the 24 KB `nvs` partition alongside ESP-IDF's own Wi-Fi
+/// data, so only small values belong there: identifiers, coordinates, and short
+/// strings. Bulk data such as artwork, audio, or logs needs its own storage.
 pub const NVS_NAMESPACE: &str = "dashboard";
 
 pub const WEATHER_REFRESH_INTERVAL: Duration = Duration::from_secs(value_or_default(
