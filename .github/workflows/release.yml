@@ -1,18 +1,17 @@
 name: Firmware Release
 
+# Releases are cut by pushing a tag, so no dev commit can produce one:
+#   git tag v0.1.1 && git push origin v0.1.1
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: Cargo package version to release, without the v prefix
-        required: true
-        type: string
+  push:
+    tags:
+      - v*
 
 permissions:
   contents: write
 
 concurrency:
-  group: firmware-release-${{ inputs.version }}
+  group: firmware-release-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -25,10 +24,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - name: Check out main
+      # Checks out the tagged commit that triggered the run.
+      - name: Check out the tag
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: main
 
       - name: Install ESP Xtensa Rust toolchain
         uses: esp-rs/xtensa-toolchain@ec6d36527049a7f4fb2cb0c1a644668c1bb8a2a4 # v1.7.0
@@ -49,21 +47,17 @@ jobs:
           key: embuild-${{ runner.os }}-${{ hashFiles('.cargo/config.toml') }}
           restore-keys: embuild-${{ runner.os }}-
 
+      # The tag is the request; Cargo.toml must agree with it, because the
+      # version it carries is what a device compares the manifest against.
       - name: Validate release version
         id: version
         shell: bash
-        env:
-          REQUESTED_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
           PACKAGE_VERSION="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "inkdash") | .version')"
-          if [[ "$REQUESTED_VERSION" != "$PACKAGE_VERSION" ]]; then
-            echo "Requested $REQUESTED_VERSION but Cargo.toml contains $PACKAGE_VERSION" >&2
-            exit 1
-          fi
-          TAG="v$PACKAGE_VERSION"
-          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists" >&2
+          if [[ "$TAG" != "v$PACKAGE_VERSION" ]]; then
+            echo "Tag $TAG does not match version $PACKAGE_VERSION in Cargo.toml" >&2
             exit 1
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
@@ -142,4 +136,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.version.outputs.tag }}
         run: |
-          gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "$TAG" --generate-notes --fail-on-no-commits
+          gh release create "$TAG" dist/* --title "$TAG" --generate-notes --fail-on-no-commits
