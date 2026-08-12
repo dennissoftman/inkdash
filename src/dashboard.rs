@@ -24,6 +24,25 @@ pub struct DashboardData {
     pub language: Language,
 }
 
+impl DashboardData {
+    /// Everything unknown until the first sensor read. Fields are updated in
+    /// place from then on, so state that is not read from hardware — the
+    /// language, and anything added later — survives a refresh.
+    pub const fn new(language: Language) -> Self {
+        Self {
+            time: None,
+            climate: None,
+            battery: BatteryStatus::unavailable(),
+            power_source: PowerSource::Battery,
+            wifi_connected: false,
+            wifi_ssid: None,
+            wifi_signal_dbm: None,
+            weather: None,
+            language,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DashboardScreen {
     Home,

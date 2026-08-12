@@ -229,7 +229,9 @@ fn main() -> Result<()> {
     let mut system_time_synchronized = false;
     // The USB SOF monitor has had time to settle during peripheral setup.
     power_policy.refresh()?;
-    let mut data = collect_dashboard_data(
+    let mut data = DashboardData::new(language);
+    refresh_dashboard_data(
+        &mut data,
         &mut clock,
         &climate_sensor,
         &mut i2c,
@@ -237,7 +239,6 @@ fn main() -> Result<()> {
         &wifi,
         weather.latest(),
     );
-    data.language = language;
     let mut battery_notifications = BatteryNotificationSchedule::new();
     queue_battery_notification(&mut battery_notifications, &data, &event_sender);
     schedule_clock(&clock_timer, data.time)?;
@@ -787,6 +788,8 @@ fn schedule_clock(timer: &EspTimer<'_>, time: Option<datetime::DateTime>) -> Res
     Ok(())
 }
 
+/// Reads the sensors into `data`, leaving every field the hardware does not
+/// own untouched.
 fn refresh_dashboard_data<'d, C, M>(
     data: &mut DashboardData,
     clock: &mut Clock,
@@ -794,75 +797,37 @@ fn refresh_dashboard_data<'d, C, M>(
     i2c: &mut I2cBus<'_>,
     battery: &mut Battery<'d, C, M>,
     wifi: &WifiManager,
-    weather: Option<std::sync::Arc<weather::Weather>>,
+    weather: Option<Arc<weather::Weather>>,
 ) where
     C: AdcChannel,
     M: Borrow<AdcDriver<'d, C::AdcUnit>>,
 {
-    let language = data.language;
-    *data = collect_dashboard_data(clock, climate_sensor, i2c, battery, wifi, weather);
-    data.language = language;
+    // `Clock` carries the last reading forward, so a glitch on the bus cannot
+    // blank the display, and it logs whatever it had to do.
+    data.time = clock.now(i2c);
+    data.climate = climate_sensor
+        .read(i2c)
+        .inspect_err(|error| log::warn!("Climate read failed: {error:#}"))
+        .ok();
+    data.battery = battery
+        .read()
+        .inspect_err(|error| log::warn!("Battery read failed: {error:#}"))
+        .unwrap_or_else(|_| BatteryStatus::unavailable());
+    data.power_source = power::source();
+    data.weather = weather;
+    update_wifi_data(data, wifi);
 }
 
 fn update_wifi_data(data: &mut DashboardData, wifi: &WifiManager) {
     let status = wifi
         .status()
-        .inspect_err(|error| log::warn!("Wi-Fi event status failed: {error:#}"))
+        .inspect_err(|error| log::warn!("Wi-Fi status failed: {error:#}"))
         .ok();
     data.wifi_connected = status.as_ref().is_some_and(|status| status.connected);
     data.wifi_ssid = status
         .as_ref()
         .and_then(|status| status.configured_ssid.clone());
     data.wifi_signal_dbm = status.and_then(|status| status.signal_dbm);
-}
-
-fn collect_dashboard_data<'d, C, M>(
-    clock: &mut Clock,
-    climate_sensor: &Shtc3,
-    i2c: &mut I2cBus<'_>,
-    battery: &mut Battery<'d, C, M>,
-    wifi: &WifiManager,
-    weather: Option<std::sync::Arc<weather::Weather>>,
-) -> DashboardData
-where
-    C: AdcChannel,
-    M: Borrow<AdcDriver<'d, C::AdcUnit>>,
-{
-    // `Clock` carries the last reading forward, so a glitch on the bus cannot
-    // blank the display, and it logs whatever it had to do.
-    let time = clock.now(i2c);
-    let climate = climate_sensor
-        .read(i2c)
-        .inspect_err(|error| log::warn!("Climate read failed: {error:#}"))
-        .ok();
-    let battery = battery
-        .read()
-        .inspect_err(|error| log::warn!("Battery read failed: {error:#}"))
-        .unwrap_or_else(|_| BatteryStatus::unavailable());
-    let wifi_status = wifi
-        .status()
-        .inspect_err(|error| log::warn!("Wi-Fi status failed: {error:#}"))
-        .ok();
-    let wifi_connected = wifi_status
-        .as_ref()
-        .map(|status| status.connected)
-        .unwrap_or(false);
-    let wifi_ssid = wifi_status
-        .as_ref()
-        .and_then(|status| status.configured_ssid.clone());
-    let wifi_signal_dbm = wifi_status.as_ref().and_then(|status| status.signal_dbm);
-    let power_source = power::source();
-    DashboardData {
-        time,
-        climate,
-        battery,
-        power_source,
-        wifi_connected,
-        wifi_ssid,
-        wifi_signal_dbm,
-        weather,
-        language: Language::default(),
-    }
 }
 
 fn handle_command(command: Command, context: &mut CommandContext<'_, '_, '_>) -> bool {
