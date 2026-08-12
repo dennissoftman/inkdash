@@ -198,8 +198,10 @@ fn parse(line: &str) -> Result<Command> {
                 volume_percent,
             })
         }
-        [group, pcm, data, encoded] if group == "AUDIO" && pcm == "PCM" && data == "DATA" => {
-            Ok(Command::AudioPcmData(decode_base64(encoded)?))
+        // Base64 is case sensitive, so the chunk is taken from the original
+        // words rather than the upper-cased ones matched on here.
+        [group, pcm, data, _] if group == "AUDIO" && pcm == "PCM" && data == "DATA" => {
+            Ok(Command::AudioPcmData(decode_base64(&words[3])?))
         }
         [group, pcm, end] if group == "AUDIO" && pcm == "PCM" && end == "END" => {
             Ok(Command::AudioPcmEnd)
@@ -268,7 +270,7 @@ fn parse(line: &str) -> Result<Command> {
 fn decode_base64(encoded: &str) -> Result<Vec<u8>> {
     let bytes = encoded.as_bytes();
     if bytes.is_empty() || bytes.len() % 4 != 0 {
-        bail!("PCM chunk must be non-empty padded Base64");
+        bail!("chunk must be non-empty padded Base64");
     }
 
     let mut decoded = Vec::with_capacity(bytes.len() / 4 * 3);
@@ -280,7 +282,7 @@ fn decode_base64(encoded: &str) -> Result<Vec<u8>> {
 
         if group[2] == b'=' {
             if !is_last || group[3] != b'=' || second & 0x0f != 0 {
-                bail!("invalid Base64 padding in PCM chunk");
+                bail!("invalid Base64 padding in chunk");
             }
             continue;
         }
@@ -289,7 +291,7 @@ fn decode_base64(encoded: &str) -> Result<Vec<u8>> {
         decoded.push((second << 4) | (third >> 2));
         if group[3] == b'=' {
             if !is_last || third & 0x03 != 0 {
-                bail!("invalid Base64 padding in PCM chunk");
+                bail!("invalid Base64 padding in chunk");
             }
             continue;
         }
@@ -307,7 +309,7 @@ fn base64_value(byte: u8) -> Result<u8> {
         b'0'..=b'9' => Ok(byte - b'0' + 52),
         b'+' => Ok(62),
         b'/' => Ok(63),
-        _ => bail!("invalid Base64 character in PCM chunk"),
+        _ => bail!("invalid Base64 character in chunk"),
     }
 }
 
