@@ -3,7 +3,7 @@ use std::borrow::Borrow;
 use anyhow::Result;
 use esp_idf_hal::adc::oneshot::{AdcChannelDriver, AdcDriver};
 use esp_idf_hal::adc::AdcChannel;
-use esp_idf_hal::delay::FreeRtos;
+use esp_idf_hal::delay::Ets;
 
 const DIVIDER_MULTIPLIER: f32 = 2.0;
 const PRESENT_THRESHOLD_V: f32 = 2.7;
@@ -43,11 +43,17 @@ where
     }
 
     pub fn read(&mut self) -> Result<BatteryStatus> {
-        let mut millivolts = 0_u32;
         const SAMPLE_COUNT: u32 = 16;
-        for _ in 0..SAMPLE_COUNT {
+        // Samples are spaced with a busy-wait, not `FreeRtos::delay_ms`: the
+        // 100 Hz tick rounds any sub-tick sleep up to a full 10 ms tick, which
+        // turned a 30 ms sampling window into more than a tenth of a second of
+        // blocked event loop on every minute boundary.
+        let mut millivolts = 0_u32;
+        for sample in 0..SAMPLE_COUNT {
+            if sample > 0 {
+                Ets::delay_us(200);
+            }
             millivolts += self.channel.read()? as u32;
-            FreeRtos::delay_ms(2);
         }
 
         let voltage_v = millivolts as f32 / SAMPLE_COUNT as f32 / 1000.0 * DIVIDER_MULTIPLIER;
