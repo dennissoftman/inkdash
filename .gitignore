@@ -1,4 +1,6 @@
 /target/
+/tools/backdrop-preview/target/
+/tools/backdrop-preview/backdrops.png
 /.embuild/
 /sdkconfig
 /sdkconfig.old

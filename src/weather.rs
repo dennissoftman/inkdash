@@ -55,6 +55,7 @@ pub enum WeatherKind {
     Fog,
     Rain,
     Snow,
+    Storm,
 }
 
 impl Weather {
@@ -123,8 +124,9 @@ impl WeatherKind {
             0 => WeatherKind::Sunny,
             1..=3 => WeatherKind::Cloudy,
             45 | 48 => WeatherKind::Fog,
-            51..=67 | 80..=82 | 95..=99 => WeatherKind::Rain,
+            51..=67 | 80..=82 => WeatherKind::Rain,
             71..=77 | 85 | 86 => WeatherKind::Snow,
+            95..=99 => WeatherKind::Storm,
             _ => WeatherKind::Cloudy,
         }
     }

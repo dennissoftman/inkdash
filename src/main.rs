@@ -274,11 +274,14 @@ fn main() -> Result<()> {
                     panel_initialized = true;
                     partial_refreshes = if needs_full { 0 } else { partial_refreshes + 1 };
                     force_full_refresh = false;
+                    let (slot, sky) = dashboard::scene(&data);
                     log::info!(
-                        "Dashboard refreshed: time={}, temp={}, humidity={}, wifi={}, rssi={}, weather={}, battery={}",
+                        "Dashboard refreshed: time={}, scene={}/{}, temp={}, humidity={}, wifi={}, rssi={}, weather={}, battery={}",
                         data.time
                             .map(|value| value.to_string())
                             .unwrap_or_else(|| "unset".into()),
+                        slot.map_or("none", |slot| slot.label()),
+                        sky.label(),
                         data.climate
                             .map(|value| format!("{:.1} C", value.temperature_c))
                             .unwrap_or_else(|| "unavailable".into()),

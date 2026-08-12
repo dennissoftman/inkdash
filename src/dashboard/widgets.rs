@@ -19,6 +19,7 @@ use crate::shtc3::ClimateReading;
 use crate::weather::{ForecastPeriod, Weather, WeatherKind};
 use crate::wifi::wifi_signal_bars;
 
+use super::backdrops;
 use super::{DashboardData, DashboardScreen};
 
 pub fn render(
@@ -264,6 +265,7 @@ impl Widget for HomeScreen<'_> {
         let clock = ClockWidget {
             time: self.data.time,
             language: self.data.language,
+            sky: sky_for(self.data.weather.as_deref()),
         };
         let indoor = IndoorWidget {
             reading: self.data.climate,
@@ -296,6 +298,20 @@ impl Widget for HomeScreen<'_> {
 struct ClockWidget {
     time: Option<DateTime>,
     language: Language,
+    sky: backdrops::Sky,
+}
+
+/// Translates the current conditions into the scene the artwork draws. Without
+/// weather yet, the hour's own clear-sky scene is the right thing to show.
+pub(super) fn sky_for(weather: Option<&Weather>) -> backdrops::Sky {
+    match weather.map(|value| value.kind()) {
+        None | Some(WeatherKind::Sunny) => backdrops::Sky::Clear,
+        Some(WeatherKind::Cloudy) => backdrops::Sky::Cloudy,
+        Some(WeatherKind::Fog) => backdrops::Sky::Fog,
+        Some(WeatherKind::Rain) => backdrops::Sky::Rain,
+        Some(WeatherKind::Snow) => backdrops::Sky::Snow,
+        Some(WeatherKind::Storm) => backdrops::Sky::Storm,
+    }
 }
 
 impl Widget for ClockWidget {
@@ -304,7 +320,15 @@ impl Widget for ClockWidget {
             .time
             .map(|value| format!("{:02}:{:02}", value.hour, value.minute))
             .unwrap_or_else(|| "--:--".to_owned());
-        let color = draw_time_background(target, bounds, self.time, thin(), filled());
+        let color = match self.time {
+            Some(time) => backdrops::draw(
+                target,
+                bounds,
+                backdrops::Slot::from_hour(time.hour),
+                self.sky,
+            ),
+            None => backdrops::draw_blank(target, bounds),
+        };
         draw_double_size_time(
             target,
             &time,
@@ -947,157 +971,6 @@ fn draw_page_indicator(
     }
 }
 
-#[derive(Clone, Copy)]
-enum TimeOfDay {
-    Morning,
-    Day,
-    Evening,
-    Night,
-}
-
-impl TimeOfDay {
-    fn from_hour(hour: u8) -> Self {
-        match hour {
-            5..=10 => Self::Morning,
-            11..=16 => Self::Day,
-            17..=20 => Self::Evening,
-            _ => Self::Night,
-        }
-    }
-}
-
-fn draw_time_background(
-    target: &mut Framebuffer,
-    bounds: Rectangle,
-    time: Option<DateTime>,
-    thin: PrimitiveStyle<BinaryColor>,
-    filled: PrimitiveStyle<BinaryColor>,
-) -> BinaryColor {
-    let card = Rectangle::new(
-        bounds.top_left + Point::new(4, 3),
-        Size::new(bounds.size.width.saturating_sub(8), 72),
-    );
-    let Some(period) = time.map(|value| TimeOfDay::from_hour(value.hour)) else {
-        card.into_styled(thin).draw(target).ok();
-        return BinaryColor::On;
-    };
-
-    match period {
-        TimeOfDay::Morning => {
-            card.into_styled(thin).draw(target).ok();
-            draw_sunrise(target, bounds, false, thin);
-            BinaryColor::On
-        }
-        TimeOfDay::Day => {
-            card.into_styled(thin).draw(target).ok();
-            draw_day_sky(target, bounds, thin);
-            BinaryColor::On
-        }
-        TimeOfDay::Evening => {
-            card.into_styled(thin).draw(target).ok();
-            draw_sunrise(target, bounds, true, thin);
-            BinaryColor::On
-        }
-        TimeOfDay::Night => {
-            card.into_styled(filled).draw(target).ok();
-            draw_night_sky(target, bounds);
-            BinaryColor::Off
-        }
-    }
-}
-
-fn draw_sunrise(
-    target: &mut Framebuffer,
-    bounds: Rectangle,
-    evening: bool,
-    thin: PrimitiveStyle<BinaryColor>,
-) {
-    let center_x = if evening {
-        bounds.top_left.x + bounds.size.width as i32 - 23
-    } else {
-        bounds.top_left.x + 22
-    };
-    Circle::new(Point::new(center_x - 10, bounds.top_left.y + 57), 21)
-        .into_styled(thin)
-        .draw(target)
-        .ok();
-    for y in [96, 99] {
-        let y = bounds.top_left.y + y - 26;
-        Line::new(
-            Point::new(bounds.top_left.x + 8, y),
-            Point::new(bounds.top_left.x + bounds.size.width as i32 - 8, y),
-        )
-        .into_styled(thin)
-        .draw(target)
-        .ok();
-    }
-    for (dx, dy) in [(-15, -8), (-11, -15), (0, -19), (11, -15), (15, -8)] {
-        Line::new(
-            Point::new(center_x + dx, bounds.top_left.y + 67 + dy),
-            Point::new(center_x + dx / 2, bounds.top_left.y + 67 + dy / 2),
-        )
-        .into_styled(thin)
-        .draw(target)
-        .ok();
-    }
-}
-
-fn draw_day_sky(target: &mut Framebuffer, bounds: Rectangle, thin: PrimitiveStyle<BinaryColor>) {
-    let right = bounds.top_left.x + bounds.size.width as i32;
-    let y = bounds.top_left.y;
-    Circle::new(Point::new(right - 27, y + 16), 13)
-        .into_styled(thin)
-        .draw(target)
-        .ok();
-    for (start, end) in [
-        ((-21, 11), (-21, 14)),
-        ((-21, 30), (-21, 33)),
-        ((-32, 22), (-29, 22)),
-        ((-13, 22), (-10, 22)),
-        ((-29, 14), (-27, 16)),
-        ((-15, 28), (-13, 30)),
-        ((-29, 30), (-27, 28)),
-        ((-15, 16), (-13, 14)),
-    ] {
-        Line::new(
-            Point::new(right + start.0, y + start.1),
-            Point::new(right + end.0, y + end.1),
-        )
-        .into_styled(thin)
-        .draw(target)
-        .ok();
-    }
-    draw_outline_cloud(target, bounds.top_left + Point::new(20, 53), thin);
-}
-
-fn draw_night_sky(target: &mut Framebuffer, bounds: Rectangle) {
-    let white_fill = PrimitiveStyle::with_fill(BinaryColor::Off);
-    let black_fill = PrimitiveStyle::with_fill(BinaryColor::On);
-    let white_line = PrimitiveStyle::with_stroke(BinaryColor::Off, 1);
-    Circle::new(bounds.top_left + Point::new(15, 17), 20)
-        .into_styled(white_fill)
-        .draw(target)
-        .ok();
-    Circle::new(bounds.top_left + Point::new(22, 13), 20)
-        .into_styled(black_fill)
-        .draw(target)
-        .ok();
-    for point in [
-        bounds.top_left + Point::new(bounds.size.width as i32 - 22, 17),
-        bounds.top_left + Point::new(bounds.size.width as i32 - 36, 39),
-        bounds.top_left + Point::new(bounds.size.width as i32 - 15, 52),
-    ] {
-        Line::new(point + Point::new(-2, 0), point + Point::new(2, 0))
-            .into_styled(white_line)
-            .draw(target)
-            .ok();
-        Line::new(point + Point::new(0, -2), point + Point::new(0, 2))
-            .into_styled(white_line)
-            .draw(target)
-            .ok();
-    }
-}
-
 fn draw_thermometer_icon(
     target: &mut Framebuffer,
     center: Point,
@@ -1213,6 +1086,35 @@ fn draw_weather_icon(
                     .draw(target)
                     .ok();
             }
+        }
+        Some(WeatherKind::Storm) => {
+            draw_filled_cloud(target, center + Point::new(0, -3), filled);
+            for x in [-10_i32, 9] {
+                Line::new(
+                    center + Point::new(x + 2, 6),
+                    center + Point::new(x - 1, 13),
+                )
+                .into_styled(thin)
+                .draw(target)
+                .ok();
+            }
+            // A bolt between the outer streaks reads as thunder at icon size.
+            Triangle::new(
+                center + Point::new(1, 5),
+                center + Point::new(-4, 12),
+                center + Point::new(1, 12),
+            )
+            .into_styled(filled)
+            .draw(target)
+            .ok();
+            Triangle::new(
+                center + Point::new(-1, 10),
+                center + Point::new(4, 8),
+                center + Point::new(-2, 16),
+            )
+            .into_styled(filled)
+            .draw(target)
+            .ok();
         }
         None => {
             let style = MonoTextStyle::new(&FONT_9X15_BOLD, BinaryColor::On);

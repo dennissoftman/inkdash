@@ -6,12 +6,13 @@ Modular Rust + ESP-IDF firmware for the Waveshare **ESP32-S3-ePaper-1.54**
 The dashboard currently shows:
 
 - a centered `HH:MM` clock and `Mon 10 Jun` date from the onboard PCF85063 RTC,
-  framed by a morning/day/evening/night scene selected from the current hour;
+  framed by a scene drawn from the current hour and the current weather — rain,
+  snow, fog, cloud, or a thunderbolt (see [Clock backdrops](#clock-backdrops));
 - indoor temperature and relative humidity with thermometer and water-drop
   icons in the lower-left widget;
 - current outdoor temperature and conditions plus today's mean, humidity, and
   rain chance from Open-Meteo in the lower-right widget, using sun, cloud, fog,
-  rain, and snow condition icons;
+  rain, snow, and thunderstorm condition icons;
 - Wi-Fi signal strength and the configured network name at the top left;
 - a five-level battery icon at the top right, with a lightning bolt on its left
   while attached to a USB host.
@@ -169,6 +170,69 @@ streams are limited to 120 seconds. The CLI transports PCM as acknowledged
 Base64 chunks, avoiding control-byte handling in ESP-IDF's line-oriented
 console and automatically returning to ordinary commands after playback.
 
+## Clock backdrops
+
+The clock card carries a scene built from two things: the hour and the current
+conditions.
+
+The hour picks the sky, the sun or moon, and the ground: sunrise over hills
+(05:00–10:59), a high sun with conifers on the ridge (11:00–16:59), a sun sinking
+into the ridge (17:00–20:59), and an inverted card with a crescent moon and a lit
+skyline (21:00–04:59).
+
+The weather from Open-Meteo then draws over it, so the card shows what it is
+doing outside without reading a word:
+
+| Conditions | What the scene gains |
+| --- | --- |
+| Clear | rays, the moon's halo, birds by day, a full star field at night |
+| Cloudy | a cloud bank across the sun or moon, and a slightly heavier sky |
+| Fog | drifting bands, a bare disc, and pale bands dissolving the ground |
+| Rain | a cloud, falling streaks, and puddles below the horizon |
+| Snow | a cloud, flakes, and settled snow along the ridge |
+| Thunderstorm | the rain scene plus a bolt under the cloud |
+
+Anything overcast also drops the clear-sky details: no rays, no birds, and no
+stars, which is most of what makes the conditions readable at a glance. The sky
+texture is ordered dithering that feathers out as it approaches the clock, so the
+digits keep their contrast in every combination. Storms now have their own
+condition icon on the weather pages too, instead of borrowing rain's.
+
+The artwork lives in `src/dashboard/backdrops.rs` with no dependency on the rest
+of the firmware, so it can be rendered on a host machine. The preview
+tool includes that module and the real framebuffer, then writes a PNG contact
+sheet of every hour and condition combination with the clock drawn over them:
+
+```sh
+cargo +stable run --manifest-path tools/backdrop-preview/Cargo.toml \
+  --target "$(rustc -vV | sed -n 's/^host: //p')"
+# writes tools/backdrop-preview/backdrops.png
+
+# Append a packed bitmap to preview a custom backdrop the same way.
+cargo +stable run --manifest-path tools/backdrop-preview/Cargo.toml \
+  --target "$(rustc -vV | sed -n 's/^host: //p')" -- backdrop.bin
+```
+
+The explicit target and `+stable` are what keep the tool off the board's build
+settings in `.cargo/config.toml`. Editing the artwork and re-running takes a
+couple of seconds, so scenes can be iterated without flashing.
+
+Custom artwork is not stored on the device yet. The drawing side is finished and
+storage-agnostic — `backdrops::draw_custom` takes a packed 192 × 72 bitmap, one
+bit per pixel, plus a flag pair for the clock colour and for a plate behind the
+text — but four slots in NVS would cost about 7 KB of a 24 KB partition, which is
+the wrong home for artwork. An SD card is the intended source. Until then the
+preview tool is the only consumer, and it renders a bitmap exactly as the panel
+would:
+
+```sh
+cargo +stable run --manifest-path tools/backdrop-preview/Cargo.toml \
+  --target "$(rustc -vV | sed -n 's/^host: //p')" -- backdrop.bin
+
+# Any image converts to that format without extra packages:
+magick photo.jpg -resize 192x72! -dither FloydSteinberg -monochrome backdrop.pbm
+```
+
 ## Project structure
 
 | Module | Responsibility |
@@ -193,10 +257,12 @@ console and automatically returning to ordinary commands after playback.
 | `src/notifications.rs` | semantic battery-alert scheduling and quiet-hour policy |
 | `src/ota.rs` | host-neutral manifest lookup, cancellable download, digest verification, and ESP-IDF OTA writes |
 | `src/dashboard.rs` | dashboard state, page selection, and render entry point |
+| `src/dashboard/backdrops.rs` | hour and weather clock artwork, and custom bitmap drawing |
 | `src/dashboard/widgets.rs` | composable status, clock, climate, and weather widgets |
 | `src/epaper.rs` | SPI panel driver, dirty-window writes, and refresh waveforms |
 | `src/i2c_bus.rs` | ESP-IDF 5 current master-bus API used by onboard sensors |
 | `src/power.rs` | CPU dynamic-frequency and always-responsive USB policy |
+| `tools/backdrop-preview/` | host-side PNG preview of the clock artwork, sharing the firmware's modules |
 | `espflash.toml` | 8 MB flash size and custom partition-table selection |
 | `partitions.csv` | NVS, PHY, rollback metadata, and two safe OTA application slots |
 

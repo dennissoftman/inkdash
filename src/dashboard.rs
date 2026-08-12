@@ -1,3 +1,4 @@
+pub mod backdrops;
 mod widgets;
 
 use std::sync::Arc;
@@ -55,4 +56,13 @@ pub fn render(
     ota_screen: &ota::Screen,
 ) {
     widgets::render(framebuffer, data, screen, ota_screen);
+}
+
+/// The scene the clock card is currently drawing, for logging and diagnostics.
+pub fn scene(data: &DashboardData) -> (Option<backdrops::Slot>, backdrops::Sky) {
+    (
+        data.time
+            .map(|value| backdrops::Slot::from_hour(value.hour)),
+        widgets::sky_for(data.weather.as_deref()),
+    )
 }

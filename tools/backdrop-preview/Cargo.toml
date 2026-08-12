@@ -1,0 +1,18 @@
+# Host-side preview for the clock-card artwork. It includes the firmware's own
+# framebuffer and backdrop modules, so the PNG it writes is what the panel gets.
+#
+# Run it from the repository root, on a host target rather than the board's:
+#
+#   cargo +stable run --manifest-path tools/backdrop-preview/Cargo.toml \
+#     --target "$(rustc -vV | sed -n 's/^host: //p')" [-- custom.bin]
+[package]
+name = "backdrop-preview"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+embedded-graphics = "0.8.1"
+
+# Kept out of the firmware build; this crate is never flashed.
+[workspace]
