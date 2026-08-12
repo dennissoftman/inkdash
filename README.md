@@ -85,7 +85,12 @@ HELP
 
 Successful commands begin with `OK`; malformed commands and hardware/network
 failures begin with `ERR`. The RTC stores local wall-clock time and has no
-timezone field. After Wi-Fi comes up, SNTP synchronizes it on boot and once per
+timezone field. `TIME GET` and `STATUS` always read the hardware, so a failing
+RTC is reported rather than papered over; the clock on the panel instead carries
+the last good reading forward, advanced by uptime, because a minute that is
+slightly wrong beats `--:--`. Dashes appear only until the first successful read,
+which on a board whose RTC has lost its backup power means until the first NTP
+sync. After Wi-Fi comes up, SNTP synchronizes it on boot and once per
 day. The location-derived UTC offset keeps the hardware clock in local time and
 also applies daylight-saving changes. Wi-Fi credentials persist in the default
 ESP-IDF NVS partition. They are not printed back by any command.
@@ -245,6 +250,7 @@ magick photo.jpg -resize 192x72! -dither FloydSteinberg -monochrome backdrop.pbm
 | `src/events.rs` | central application event types and blocking queue |
 | `src/datetime.rs` | validated date/time representation and parsing |
 | `src/rtc.rs` | PCF85063 BCD register protocol |
+| `src/clock.rs` | displayed time, carrying the last RTC reading through failed reads |
 | `src/shtc3.rs` | SHTC3 measurement, CRC, sleep/wake handling |
 | `src/battery.rs` | calibrated ADC sampling and approximate LiPo percentage |
 | `src/audio.rs` | ES8311 setup and temporary I2S tone playback |

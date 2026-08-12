@@ -2,6 +2,7 @@ mod audio;
 mod battery;
 mod board;
 mod buttons;
+mod clock;
 mod commands;
 mod config;
 mod dashboard;
@@ -31,6 +32,7 @@ use audio::Audio;
 use battery::{Battery, BatteryStatus};
 use board::BoardPower;
 use buttons::ButtonEvent;
+use clock::Clock;
 use commands::Command;
 use dashboard::{DashboardData, DashboardScreen};
 use embedded_graphics::geometry::Size;
@@ -55,14 +57,13 @@ use ink_stacks::Framebuffer;
 use language::{Language, LanguageStore};
 use location::LocationService;
 use notifications::BatteryNotificationSchedule;
-use rtc::Rtc;
 use shtc3::Shtc3;
 use weather::WeatherService;
 use wifi::{WifiCredentials, WifiManager};
 
 /// Everything a console command may need to read or change.
 struct CommandContext<'a, 'i, 's> {
-    rtc: &'a Rtc,
+    clock: &'a mut Clock,
     i2c: &'a mut I2cBus<'i>,
     wifi: &'a mut WifiManager,
     audio: &'a mut Audio<'s>,
@@ -109,7 +110,7 @@ fn main() -> Result<()> {
             Err(error) => log::warn!("I2C probe failed for {name} at 0x{address:02x}: {error:#}"),
         }
     }
-    let rtc = Rtc::new();
+    let mut clock = Clock::new();
     let climate_sensor = Shtc3::new();
     match climate_sensor.initialize(&mut i2c) {
         Ok(id) => log::info!("SHTC3 detected, ID 0x{id:04x}"),
@@ -229,7 +230,7 @@ fn main() -> Result<()> {
     // The USB SOF monitor has had time to settle during peripheral setup.
     power_policy.refresh()?;
     let mut data = collect_dashboard_data(
-        &rtc,
+        &mut clock,
         &climate_sensor,
         &mut i2c,
         &mut battery,
@@ -453,7 +454,7 @@ fn main() -> Result<()> {
                     if handle_command(
                         command,
                         &mut CommandContext {
-                            rtc: &rtc,
+                            clock: &mut clock,
                             i2c: &mut i2c,
                             wifi: &mut wifi,
                             audio: &mut audio,
@@ -464,7 +465,7 @@ fn main() -> Result<()> {
                     ) {
                         refresh_dashboard_data(
                             &mut data,
-                            &rtc,
+                            &mut clock,
                             &climate_sensor,
                             &mut i2c,
                             &mut battery,
@@ -484,7 +485,7 @@ fn main() -> Result<()> {
                 AppEvent::ClockDue => {
                     refresh_dashboard_data(
                         &mut data,
-                        &rtc,
+                        &mut clock,
                         &climate_sensor,
                         &mut i2c,
                         &mut battery,
@@ -536,12 +537,15 @@ fn main() -> Result<()> {
                             system_time_synchronized && Some(*offset) != previous_utc_offset
                         });
                     if let Some(utc_offset_seconds) = changed_utc_offset {
-                        let rtc_updated =
-                            synchronize_rtc_from_system_time(&rtc, &mut i2c, utc_offset_seconds);
+                        let rtc_updated = synchronize_rtc_from_system_time(
+                            &mut clock,
+                            &mut i2c,
+                            utc_offset_seconds,
+                        );
                         if rtc_updated {
                             refresh_dashboard_data(
                                 &mut data,
-                                &rtc,
+                                &mut clock,
                                 &climate_sensor,
                                 &mut i2c,
                                 &mut battery,
@@ -608,10 +612,14 @@ fn main() -> Result<()> {
                         .latest()
                         .map(|location| location.utc_offset_seconds)
                     {
-                        if synchronize_rtc_from_system_time(&rtc, &mut i2c, utc_offset_seconds) {
+                        if synchronize_rtc_from_system_time(
+                            &mut clock,
+                            &mut i2c,
+                            utc_offset_seconds,
+                        ) {
                             refresh_dashboard_data(
                                 &mut data,
-                                &rtc,
+                                &mut clock,
                                 &climate_sensor,
                                 &mut i2c,
                                 &mut battery,
@@ -734,7 +742,7 @@ fn main() -> Result<()> {
 }
 
 fn synchronize_rtc_from_system_time(
-    rtc: &Rtc,
+    clock: &mut Clock,
     i2c: &mut I2cBus<'_>,
     utc_offset_seconds: i32,
 ) -> bool {
@@ -745,7 +753,7 @@ fn synchronize_rtc_from_system_time(
             datetime::DateTime::from_unix_seconds(elapsed.as_secs(), utc_offset_seconds)
         })
         .and_then(|value| {
-            rtc.set(i2c, value)?;
+            clock.set(i2c, value)?;
             Ok(value)
         });
     match result {
@@ -781,7 +789,7 @@ fn schedule_clock(timer: &EspTimer<'_>, time: Option<datetime::DateTime>) -> Res
 
 fn refresh_dashboard_data<'d, C, M>(
     data: &mut DashboardData,
-    rtc: &Rtc,
+    clock: &mut Clock,
     climate_sensor: &Shtc3,
     i2c: &mut I2cBus<'_>,
     battery: &mut Battery<'d, C, M>,
@@ -792,7 +800,7 @@ fn refresh_dashboard_data<'d, C, M>(
     M: Borrow<AdcDriver<'d, C::AdcUnit>>,
 {
     let language = data.language;
-    *data = collect_dashboard_data(rtc, climate_sensor, i2c, battery, wifi, weather);
+    *data = collect_dashboard_data(clock, climate_sensor, i2c, battery, wifi, weather);
     data.language = language;
 }
 
@@ -809,7 +817,7 @@ fn update_wifi_data(data: &mut DashboardData, wifi: &WifiManager) {
 }
 
 fn collect_dashboard_data<'d, C, M>(
-    rtc: &Rtc,
+    clock: &mut Clock,
     climate_sensor: &Shtc3,
     i2c: &mut I2cBus<'_>,
     battery: &mut Battery<'d, C, M>,
@@ -820,10 +828,9 @@ where
     C: AdcChannel,
     M: Borrow<AdcDriver<'d, C::AdcUnit>>,
 {
-    let time = rtc
-        .read(i2c)
-        .inspect_err(|error| log::warn!("RTC read failed: {error:#}"))
-        .ok();
+    // `Clock` carries the last reading forward, so a glitch on the bus cannot
+    // blank the display, and it logs whatever it had to do.
+    let time = clock.now(i2c);
     let climate = climate_sensor
         .read(i2c)
         .inspect_err(|error| log::warn!("Climate read failed: {error:#}"))
@@ -868,7 +875,7 @@ fn handle_command(command: Command, context: &mut CommandContext<'_, '_, '_>) ->
             | Command::Refresh
     );
     let CommandContext {
-        rtc,
+        clock,
         i2c,
         wifi,
         audio,
@@ -879,17 +886,17 @@ fn handle_command(command: Command, context: &mut CommandContext<'_, '_, '_>) ->
     match command {
         Command::Ping => println!("OK PONG"),
         Command::Help => println!("{}", commands::help_text()),
-        Command::TimeGet => match rtc.read(i2c) {
+        Command::TimeGet => match clock.read_rtc(i2c) {
             Ok(value) => println!("OK TIME {value}"),
             Err(error) => println!("ERR TIME {error:#}"),
         },
-        Command::TimeSet(value) => match rtc.set(i2c, value) {
+        Command::TimeSet(value) => match clock.set(i2c, value) {
             Ok(()) => println!("OK TIME {value}"),
             Err(error) => println!("ERR TIME {error:#}"),
         },
-        Command::TimeCalibrationGet => print_rtc_calibration(rtc, i2c),
+        Command::TimeCalibrationGet => print_rtc_calibration(clock, i2c),
         Command::TimeCalibrationSet(measured_drift_ppm) => {
-            match rtc.calibrate(i2c, measured_drift_ppm) {
+            match clock.calibrate(i2c, measured_drift_ppm) {
                 Ok(calibration) => println!(
                     "OK TIME CALIBRATION measured_drift_ppm={measured_drift_ppm:.3} steps={} correction_ppm={:.3} residual_ppm={:.3} mode=normal",
                     calibration.offset_steps,
@@ -935,7 +942,7 @@ fn handle_command(command: Command, context: &mut CommandContext<'_, '_, '_>) ->
             Err(error) => println!("ERR OTA ENDPOINT {error:#}"),
         },
         Command::Status => {
-            match rtc.read(i2c) {
+            match clock.read_rtc(i2c) {
                 Ok(value) => println!("OK TIME {value}"),
                 Err(error) => println!("ERR TIME {error:#}"),
             }
@@ -984,8 +991,8 @@ fn handle_command(command: Command, context: &mut CommandContext<'_, '_, '_>) ->
     refresh
 }
 
-fn print_rtc_calibration(rtc: &Rtc, i2c: &mut I2cBus<'_>) {
-    match rtc.calibration(i2c) {
+fn print_rtc_calibration(clock: &Clock, i2c: &mut I2cBus<'_>) {
+    match clock.calibration(i2c) {
         Ok(calibration) => println!(
             "OK TIME CALIBRATION steps={} correction_ppm={:.3} mode={}",
             calibration.offset_steps,

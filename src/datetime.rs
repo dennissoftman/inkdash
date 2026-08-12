@@ -97,6 +97,33 @@ impl DateTime {
     pub fn short_date(&self, language: Language) -> String {
         language.short_date(self.weekday(), self.day, self.month)
     }
+
+    /// Seconds since 1970-01-01 in this value's own frame, for wall-clock
+    /// arithmetic. Pairs with `from_unix_seconds(.., 0)`, which reverses it.
+    pub fn as_local_seconds(&self) -> i64 {
+        const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
+
+        unix_days_from_civil(i64::from(self.year), self.month, self.day) * SECONDS_PER_DAY
+            + i64::from(self.hour) * 3_600
+            + i64::from(self.minute) * 60
+            + i64::from(self.second)
+    }
+}
+
+/// Days relative to 1970-01-01 for a Gregorian civil date; the inverse of
+/// `civil_date_from_unix_days`.
+fn unix_days_from_civil(year: i64, month: u8, day: u8) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let month_prime = if month > 2 {
+        i64::from(month) - 3
+    } else {
+        i64::from(month) + 9
+    };
+    let day_of_year = (153 * month_prime + 2) / 5 + i64::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
 }
 
 /// Gregorian civil date conversion for days relative to 1970-01-01.
