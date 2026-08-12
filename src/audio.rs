@@ -288,8 +288,11 @@ impl<'d> Audio<'d> {
         Ok(playback.written_bytes)
     }
 
+    /// Whether the I2S channel is streaming. A remembered failure does not count:
+    /// nothing is playing then, and the dashboard must keep rendering even if the
+    /// host never sends `AUDIO PCM END`.
     pub fn is_pcm_active(&self) -> bool {
-        self.pcm.is_some() || self.pcm_error.is_some()
+        self.pcm.is_some()
     }
 }
 
@@ -404,8 +407,11 @@ fn write_tone_wave(
 }
 
 fn write_silence(driver: &mut I2sTxChannel, sample_rate_hz: u32, duration_ms: usize) -> Result<()> {
+    // Static, so this neither claims stack nor zeroes a buffer per call.
+    static SILENCE: [u8; SAMPLE_BUFFER_SIZE] = [0; SAMPLE_BUFFER_SIZE];
+
     let bytes = sample_rate_hz as usize * duration_ms / 1_000 * 2;
-    let silence = [0_u8; SAMPLE_BUFFER_SIZE];
+    let silence = &SILENCE;
     let mut remaining = bytes;
     while remaining > 0 {
         let length = remaining.min(silence.len());
