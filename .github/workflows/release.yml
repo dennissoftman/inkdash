@@ -45,7 +45,7 @@ jobs:
           REQUESTED_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          PACKAGE_VERSION="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "esp-smart-eink") | .version')"
+          PACKAGE_VERSION="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "inkdash") | .version')"
           if [[ "$REQUESTED_VERSION" != "$PACKAGE_VERSION" ]]; then
             echo "Requested $REQUESTED_VERSION but Cargo.toml contains $PACKAGE_VERSION" >&2
             exit 1
@@ -80,23 +80,23 @@ jobs:
           REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          ELF="target/xtensa-esp32s3-espidf/release/esp-smart-eink"
+          ELF="target/xtensa-esp32s3-espidf/release/inkdash"
           mkdir -p dist
-          cp "$ELF" "dist/esp-smart-eink-$TAG.elf"
+          cp "$ELF" "dist/inkdash-$TAG.elf"
           cp partitions.csv "dist/partitions-$TAG.csv"
-          espflash save-image --skip-update-check --chip esp32s3 --flash-size 8mb --partition-table partitions.csv "$ELF" dist/esp-smart-eink-ota.bin
-          espflash save-image --skip-update-check --chip esp32s3 --flash-size 8mb --partition-table partitions.csv --merge --skip-padding "$ELF" "dist/esp-smart-eink-$TAG-factory.bin"
-          FIRMWARE_SHA256="$(sha256sum dist/esp-smart-eink-ota.bin | cut -d ' ' -f 1)"
-          FIRMWARE_SIZE="$(stat -c '%s' dist/esp-smart-eink-ota.bin)"
+          espflash save-image --skip-update-check --chip esp32s3 --flash-size 8mb --partition-table partitions.csv "$ELF" dist/inkdash-ota.bin
+          espflash save-image --skip-update-check --chip esp32s3 --flash-size 8mb --partition-table partitions.csv --merge --skip-padding "$ELF" "dist/inkdash-$TAG-factory.bin"
+          FIRMWARE_SHA256="$(sha256sum dist/inkdash-ota.bin | cut -d ' ' -f 1)"
+          FIRMWARE_SIZE="$(stat -c '%s' dist/inkdash-ota.bin)"
           jq -n \
             --arg version "${TAG#v}" \
-            --arg firmware_url "https://github.com/$REPOSITORY/releases/download/$TAG/esp-smart-eink-ota.bin" \
+            --arg firmware_url "https://github.com/$REPOSITORY/releases/download/$TAG/inkdash-ota.bin" \
             --arg sha256 "$FIRMWARE_SHA256" \
             --argjson size "$FIRMWARE_SIZE" \
             '{schema_version: 1, version: $version, firmware_url: $firmware_url, size: $size, sha256: $sha256}' \
             > dist/ota-manifest.json
           cd dist
-          sha256sum esp-smart-eink-*.bin esp-smart-eink-*.elf partitions-*.csv ota-manifest.json > SHA256SUMS
+          sha256sum inkdash-*.bin inkdash-*.elf partitions-*.csv ota-manifest.json > SHA256SUMS
 
       - name: Create versioned release
         shell: bash

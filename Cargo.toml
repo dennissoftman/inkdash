@@ -1,12 +1,18 @@
 [package]
-name = "esp-smart-eink"
+name = "inkdash"
 version = "0.1.0"
 edition = "2021"
 resolver = "2"
 rust-version = "1.82"
+description = "E-paper clock and weather dashboard firmware for the Waveshare ESP32-S3-ePaper-1.54"
+repository = "https://github.com/dennissoftman/inkdash"
+license = "Apache-2.0"
+readme = "README.md"
+# Firmware for one board; there is nothing here for crates.io.
+publish = false
 
 [[bin]]
-name = "esp-smart-eink"
+name = "inkdash"
 harness = false
 
 [profile.dev]

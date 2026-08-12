@@ -1,7 +1,7 @@
-# ESP32-S3 e-paper dashboard in Rust
+# inkdash
 
-Modular Rust + ESP-IDF firmware for the Waveshare **ESP32-S3-ePaper-1.54**
-(200 × 200, black/white) development board.
+Modular Rust + ESP-IDF firmware turning the Waveshare **ESP32-S3-ePaper-1.54**
+(200 × 200, black/white) into a clock and weather dashboard.
 
 The dashboard currently shows:
 
@@ -340,7 +340,7 @@ cargo fmt --all --check
 cargo clippy -- -D warnings
 cargo build
 espflash flash --monitor --port /dev/cu.usbmodem101 \
-  target/xtensa-esp32s3-espidf/debug/esp-smart-eink
+  target/xtensa-esp32s3-espidf/debug/inkdash
 ```
 
 Set a manifest endpoint at compile time to enable update checks in a locally
@@ -399,7 +399,7 @@ The endpoint returns a deliberately small host-neutral JSON document:
 {
   "schema_version": 1,
   "version": "0.2.0",
-  "firmware_url": "https://cdn.example.com/esp-smart-eink-ota.bin",
+  "firmware_url": "https://cdn.example.com/inkdash-ota.bin",
   "size": 1415648,
   "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 }

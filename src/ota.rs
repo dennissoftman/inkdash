@@ -297,7 +297,7 @@ fn install_update(update: &UpdateInfo, events: &EventSender, cancel: &AtomicBool
     };
     let mut connection =
         EspHttpConnection::new(&configuration).context("creating OTA HTTPS client")?;
-    let user_agent = format!("esp-smart-eink/{CURRENT_VERSION}");
+    let user_agent = format!("inkdash/{CURRENT_VERSION}");
     connection
         .initiate_request(
             Method::Get,
@@ -463,7 +463,7 @@ fn get_manifest_json(url: &str) -> Result<UpdateManifest> {
     };
     let mut connection =
         EspHttpConnection::new(&configuration).context("creating manifest HTTPS client")?;
-    let user_agent = format!("esp-smart-eink/{CURRENT_VERSION}");
+    let user_agent = format!("inkdash/{CURRENT_VERSION}");
     connection
         .initiate_request(
             Method::Get,
