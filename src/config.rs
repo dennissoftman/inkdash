@@ -59,13 +59,17 @@ pub const OTA_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(value_or_defa
 ));
 pub const OTA_RESTART_DELAY: Duration =
     Duration::from_secs(value_or_default(option_env!("OTA_RESTART_SECONDS"), 3));
+// Both are per-read socket timeouts rather than limits on a whole transfer. A
+// manifest is a few hundred bytes, so it can be brief; a firmware image is
+// megabytes over Wi-Fi that may stall, and aborting that costs the whole
+// download.
 pub const OTA_MANIFEST_TIMEOUT: Duration = Duration::from_secs(value_or_default(
     option_env!("OTA_MANIFEST_TIMEOUT_SECONDS"),
-    15,
+    10,
 ));
 pub const OTA_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(value_or_default(
     option_env!("OTA_DOWNLOAD_TIMEOUT_SECONDS"),
-    5,
+    60,
 ));
 
 pub const ALERT_START_HOUR: u8 = checked_u8(value_or_default(
