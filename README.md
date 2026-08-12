@@ -209,6 +209,7 @@ sheet of every hour and condition combination with the clock drawn over them:
 cargo +stable run --manifest-path tools/backdrop-preview/Cargo.toml \
   --target "$(rustc -vV | sed -n 's/^host: //p')"
 # writes tools/backdrop-preview/backdrops.png
+#    and tools/backdrop-preview/update-screens.png
 
 # Append a packed bitmap to preview a custom backdrop the same way.
 cargo +stable run --manifest-path tools/backdrop-preview/Cargo.toml \
@@ -218,6 +219,13 @@ cargo +stable run --manifest-path tools/backdrop-preview/Cargo.toml \
 The explicit target and `+stable` are what keep the tool off the board's build
 settings in `.cargo/config.toml`. Editing the artwork and re-running takes a
 couple of seconds, so scenes can be iterated without flashing.
+
+The same run draws the firmware update screens from
+`src/dashboard/updates.rs`, which is pure for the same reason. They are the one
+part of the interface that cannot be reached by pressing buttons: each state
+appears for a few seconds during an update, some of them only when a download
+fails. `update-screens.png` has all of them side by side, including the download
+at nought, forty, and a hundred percent.
 
 Custom artwork is not stored on the device yet. The drawing side is finished and
 storage-agnostic — `backdrops::draw_custom` takes a packed 192 × 72 bitmap, one
@@ -261,11 +269,13 @@ magick photo.jpg -resize 192x72! -dither FloydSteinberg -monochrome backdrop.pbm
 | `src/ota.rs` | host-neutral manifest lookup, cancellable download, digest verification, and ESP-IDF OTA writes |
 | `src/dashboard.rs` | dashboard state, page selection, and render entry point |
 | `src/dashboard/backdrops.rs` | hour and weather clock artwork, and custom bitmap drawing |
+| `src/dashboard/style.rs` | the text sizes, strokes, and alignments every screen shares |
+| `src/dashboard/updates.rs` | firmware update screen state and its full-panel drawing |
 | `src/dashboard/widgets.rs` | composable status, clock, climate, and weather widgets |
 | `src/epaper.rs` | SPI panel driver, dirty-window writes, and refresh waveforms |
 | `src/i2c_bus.rs` | ESP-IDF 5 current master-bus API used by onboard sensors |
 | `src/power.rs` | CPU dynamic-frequency and always-responsive USB policy |
-| `tools/backdrop-preview/` | host-side PNG preview of the clock artwork, sharing the firmware's modules |
+| `tools/backdrop-preview/` | host-side PNG preview of the clock artwork and update screens, sharing the firmware's modules |
 | `espflash.toml` | 8 MB flash size and custom partition-table selection |
 | `partitions.csv` | NVS, PHY, rollback metadata, and two safe OTA application slots |
 
@@ -435,8 +445,14 @@ The endpoint returns a deliberately small host-neutral JSON document:
 
 Only semantic versions newer than the running package version are offered.
 Press **BOOT** within one minute to install, or **PWR** to cancel. PWR also
-cancels a download between chunks. The final validation and boot-selection
-step is intentionally non-cancellable and is labelled "Do not power off". No
+cancels a download between chunks. The download screen reports every ten
+percent — often enough to show progress, rarely enough not to spend the update
+redrawing the panel — as a percentage, a bar, and the byte counts, since at that
+cadence a stalled transfer and a slow one otherwise look identical. Verification
+then fills the bar and holds it: `esp_ota_end` checks the whole image in one
+blocking call that reports nothing on the way, so an animated bar there would be
+invented. That final validation and boot-selection step is intentionally
+non-cancellable and is labelled "Do not power off". No
 Wi-Fi, HTTP failures, invalid manifests, truncated or oversized downloads,
 digest mismatches, invalid ESP images, flash errors, and unavailable OTA slots
 all leave the current boot slot selected and show an error instead of rebooting.

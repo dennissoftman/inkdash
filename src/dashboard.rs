@@ -1,7 +1,11 @@
 pub mod backdrops;
+mod style;
+pub mod updates;
 mod widgets;
 
 use std::sync::Arc;
+
+use embedded_graphics::pixelcolor::BinaryColor;
 
 use crate::battery::BatteryStatus;
 use crate::datetime::DateTime;
@@ -76,9 +80,14 @@ pub fn render(
     framebuffer: &mut Framebuffer,
     data: &DashboardData,
     screen: DashboardScreen,
-    ota_screen: &ota::Screen,
+    update_screen: &updates::Screen,
 ) {
-    widgets::render(framebuffer, data, screen, ota_screen);
+    framebuffer.clear(BinaryColor::Off);
+    if update_screen.is_visible() {
+        updates::render(framebuffer, update_screen, ota::CURRENT_VERSION);
+        return;
+    }
+    widgets::render(framebuffer, data, screen);
 }
 
 /// The scene the clock card is currently drawing, for logging and diagnostics.

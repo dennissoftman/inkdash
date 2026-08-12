@@ -1,7 +1,8 @@
 /target/
 /tools/backdrop-preview/target/
 /tools/backdrop-preview/backdrops.png
-/.embuild/
+/tools/backdrop-preview/update-screens.png
+/.embuild
 /sdkconfig
 /sdkconfig.old
 /dependencies.lock

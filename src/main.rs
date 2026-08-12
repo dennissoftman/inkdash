@@ -34,7 +34,7 @@ use board::BoardPower;
 use buttons::ButtonEvent;
 use clock::Clock;
 use commands::Command;
-use dashboard::{DashboardData, DashboardScreen};
+use dashboard::{updates, DashboardData, DashboardScreen};
 use embedded_graphics::geometry::Size;
 use epaper::{Epaper, FRAMEBUFFER_SIZE, HEIGHT, WIDTH};
 use esp_idf_hal::adc::oneshot::config::{AdcChannelConfig, Calibration};
@@ -226,7 +226,7 @@ fn main() -> Result<()> {
     let mut render_requested = true;
     let mut force_full_refresh = false;
     let mut screen = DashboardScreen::Home;
-    let mut ota_screen = ota::Screen::Hidden;
+    let mut ota_screen = updates::Screen::Hidden;
     let mut pending_update: Option<ota::UpdateInfo> = None;
     let mut ota_operation_active = false;
     let mut running_image_confirmation_checked = false;
@@ -365,12 +365,12 @@ fn main() -> Result<()> {
                         ota_service.cancel();
                         ota_confirmation_timer.cancel()?;
                         pending_update = None;
-                        ota_screen = ota::Screen::Checking;
+                        ota_screen = updates::Screen::Checking;
                         render_requested = true;
                         force_full_refresh = true;
                         weather_timer.cancel()?;
                         if !data.wifi_connected {
-                            ota_screen = ota::Screen::Failed {
+                            ota_screen = updates::Screen::Failed {
                                 message: "No Wi-Fi connection".into(),
                             };
                         } else {
@@ -379,18 +379,18 @@ fn main() -> Result<()> {
                                     if ota_service.check(endpoint.url) {
                                         ota_operation_active = true;
                                     } else {
-                                        ota_screen = ota::Screen::Failed {
+                                        ota_screen = updates::Screen::Failed {
                                             message: "OTA worker is unavailable".into(),
                                         };
                                     }
                                 }
                                 Ok(None) => {
-                                    ota_screen = ota::Screen::Failed {
+                                    ota_screen = updates::Screen::Failed {
                                         message: "OTA endpoint is not configured".into(),
                                     };
                                 }
                                 Err(error) => {
-                                    ota_screen = ota::Screen::Failed {
+                                    ota_screen = updates::Screen::Failed {
                                         message: format!("OTA endpoint: {error:#}"),
                                     };
                                 }
@@ -407,13 +407,14 @@ fn main() -> Result<()> {
                         if let Some(update) = pending_update.take() {
                             let version = update.version.clone();
                             let total = update.size;
-                            ota_screen = ota::Screen::Downloading {
+                            ota_screen = updates::Screen::Downloading {
                                 version,
-                                percent: 0,
+                                downloaded: 0,
+                                total,
                             };
                             render_requested = true;
                             if !ota_service.install(update) {
-                                ota_screen = ota::Screen::Failed {
+                                ota_screen = updates::Screen::Failed {
                                     message: "OTA worker is unavailable".into(),
                                 };
                                 if data.wifi_connected {
@@ -434,7 +435,7 @@ fn main() -> Result<()> {
                     ButtonEvent::Power
                         if matches!(
                             ota_screen,
-                            ota::Screen::Finalizing { .. } | ota::Screen::Restarting { .. }
+                            updates::Screen::Finalizing { .. } | updates::Screen::Restarting { .. }
                         ) => {}
                     ButtonEvent::Power if ota_screen.is_visible() => {
                         if ota_screen.can_cancel() {
@@ -442,7 +443,7 @@ fn main() -> Result<()> {
                         }
                         ota_confirmation_timer.cancel()?;
                         pending_update = None;
-                        ota_screen = ota::Screen::Hidden;
+                        ota_screen = updates::Screen::Hidden;
                         render_requested = true;
                         force_full_refresh = true;
                         if data.wifi_connected {
@@ -648,21 +649,21 @@ fn main() -> Result<()> {
                 AppEvent::Ota(update) => {
                     match update {
                         ota::WorkerEvent::Checked(Ok(ota::CheckResult::UpToDate))
-                            if matches!(ota_screen, ota::Screen::Checking) =>
+                            if matches!(ota_screen, updates::Screen::Checking) =>
                         {
                             ota_operation_active = false;
                             data.update_available = false;
-                            ota_screen = ota::Screen::UpToDate;
+                            ota_screen = updates::Screen::UpToDate;
                             if data.wifi_connected {
                                 weather_timer.after(config::IMMEDIATE_EVENT_DELAY)?;
                             }
                         }
                         ota::WorkerEvent::Checked(Ok(ota::CheckResult::Available(update)))
-                            if matches!(ota_screen, ota::Screen::Checking) =>
+                            if matches!(ota_screen, updates::Screen::Checking) =>
                         {
                             ota_operation_active = false;
                             data.update_available = true;
-                            ota_screen = ota::Screen::Available {
+                            ota_screen = updates::Screen::Available {
                                 version: update.version.clone(),
                                 size: update.size,
                             };
@@ -670,10 +671,10 @@ fn main() -> Result<()> {
                             ota_confirmation_timer.after(config::OTA_CONFIRMATION_TIMEOUT)?;
                         }
                         ota::WorkerEvent::Checked(Err(error))
-                            if matches!(ota_screen, ota::Screen::Checking) =>
+                            if matches!(ota_screen, updates::Screen::Checking) =>
                         {
                             ota_operation_active = false;
-                            ota_screen = ota::Screen::Failed { message: error };
+                            ota_screen = updates::Screen::Failed { message: error };
                             if data.wifi_connected {
                                 weather_timer.after(config::IMMEDIATE_EVENT_DELAY)?;
                             }
@@ -702,21 +703,24 @@ fn main() -> Result<()> {
                             downloaded,
                             total,
                         } if ota_screen.is_visible() => {
-                            let percent = ((downloaded as u64 * 100) / total as u64) as u8;
-                            ota_screen = ota::Screen::Downloading { version, percent };
+                            ota_screen = updates::Screen::Downloading {
+                                version,
+                                downloaded,
+                                total,
+                            };
                         }
                         ota::WorkerEvent::Finalizing { version } if ota_screen.is_visible() => {
-                            ota_screen = ota::Screen::Finalizing { version };
+                            ota_screen = updates::Screen::Finalizing { version };
                         }
                         ota::WorkerEvent::Installed { version } => {
                             ota_operation_active = false;
-                            ota_screen = ota::Screen::Restarting { version };
+                            ota_screen = updates::Screen::Restarting { version };
                             force_full_refresh = true;
                             ota_restart_timer.after(config::OTA_RESTART_DELAY)?;
                         }
                         ota::WorkerEvent::InstallFailed(error) if ota_screen.is_visible() => {
                             ota_operation_active = false;
-                            ota_screen = ota::Screen::Failed { message: error };
+                            ota_screen = updates::Screen::Failed { message: error };
                             if data.wifi_connected {
                                 weather_timer.after(config::IMMEDIATE_EVENT_DELAY)?;
                             }
@@ -730,7 +734,7 @@ fn main() -> Result<()> {
                         ota::WorkerEvent::Cancelled => {
                             ota_operation_active = false;
                             if ota_screen.is_visible() {
-                                ota_screen = ota::Screen::Hidden;
+                                ota_screen = updates::Screen::Hidden;
                                 force_full_refresh = true;
                             }
                             if data.wifi_connected {
@@ -776,9 +780,9 @@ fn main() -> Result<()> {
                     ota_check_timer.after(config::OTA_CHECK_INTERVAL)?;
                 }
                 AppEvent::OtaConfirmationExpired => {
-                    if matches!(ota_screen, ota::Screen::Available { .. }) {
+                    if matches!(ota_screen, updates::Screen::Available { .. }) {
                         pending_update = None;
-                        ota_screen = ota::Screen::Hidden;
+                        ota_screen = updates::Screen::Hidden;
                         render_requested = true;
                         force_full_refresh = true;
                         if data.wifi_connected {
@@ -787,7 +791,7 @@ fn main() -> Result<()> {
                     }
                 }
                 AppEvent::OtaRestartDue => {
-                    if matches!(ota_screen, ota::Screen::Restarting { .. }) {
+                    if matches!(ota_screen, updates::Screen::Restarting { .. }) {
                         ota::restart();
                     }
                 }

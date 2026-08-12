@@ -46,6 +46,9 @@ pub enum CheckResult {
     Available(UpdateInfo),
 }
 
+/// Everything the worker has to say. The event loop reduces these into a
+/// `dashboard::updates::Screen`, which is what the panel draws; nothing here
+/// knows about the display.
 #[derive(Debug)]
 pub enum WorkerEvent {
     Checked(Result<CheckResult, String>),
@@ -62,39 +65,6 @@ pub enum WorkerEvent {
     },
     InstallFailed(String),
     Cancelled,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Screen {
-    Hidden,
-    Checking,
-    Available { version: String, size: usize },
-    Downloading { version: String, percent: u8 },
-    Finalizing { version: String },
-    Restarting { version: String },
-    UpToDate,
-    Failed { message: String },
-}
-
-impl Screen {
-    pub const fn is_visible(&self) -> bool {
-        !matches!(self, Self::Hidden)
-    }
-
-    pub const fn can_accept(&self) -> bool {
-        matches!(self, Self::Available { .. })
-    }
-
-    pub const fn can_start_check(&self) -> bool {
-        matches!(self, Self::Hidden | Self::UpToDate | Self::Failed { .. })
-    }
-
-    pub const fn can_cancel(&self) -> bool {
-        matches!(
-            self,
-            Self::Checking | Self::Available { .. } | Self::Downloading { .. }
-        )
-    }
 }
 
 enum Request {

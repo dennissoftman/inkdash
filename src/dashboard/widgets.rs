@@ -13,26 +13,18 @@ use crate::battery::{BatteryReading, BatteryStatus};
 use crate::datetime::DateTime;
 use crate::ink_stacks::{Framebuffer, Stack, StackItem, Widget};
 use crate::language::Language;
-use crate::ota;
 use crate::power::PowerSource;
 use crate::shtc3::ClimateReading;
 use crate::weather::{ForecastPeriod, Weather, WeatherKind};
 use crate::wifi::wifi_signal_bars;
 
 use super::backdrops;
+use super::style::{
+    center_x, centered_top, filled, large_value_style, left_top, small, thin, value_style,
+};
 use super::{DashboardData, DashboardScreen};
 
-pub fn render(
-    framebuffer: &mut Framebuffer,
-    data: &DashboardData,
-    screen: DashboardScreen,
-    ota_screen: &ota::Screen,
-) {
-    framebuffer.clear(BinaryColor::Off);
-    if ota_screen.is_visible() {
-        render_ota_screen(framebuffer, ota_screen);
-        return;
-    }
+pub fn render(framebuffer: &mut Framebuffer, data: &DashboardData, screen: DashboardScreen) {
     let status = StatusBar::new(data);
     let home = HomeScreen::new(data);
     let today = TodayScreen::new(data);
@@ -45,132 +37,6 @@ pub fn render(
     let children = [StackItem::fixed(&status, 26), StackItem::fill(page, 1)];
     let bounds = framebuffer.bounds();
     Stack::vertical(&children).draw(framebuffer, bounds);
-}
-
-fn render_ota_screen(target: &mut Framebuffer, screen: &ota::Screen) {
-    let bounds = target.bounds();
-    Text::with_text_style(
-        "FIRMWARE UPDATE",
-        Point::new(center_x(bounds), 18),
-        value_style(),
-        centered_top(),
-    )
-    .draw(target)
-    .ok();
-    Line::new(Point::new(18, 42), Point::new(181, 42))
-        .into_styled(thin())
-        .draw(target)
-        .ok();
-
-    match screen {
-        ota::Screen::Hidden => {}
-        ota::Screen::Checking => {
-            draw_ota_centered(target, "Loading...", 78, weather_value_style());
-            draw_ota_centered(target, "Checking update manifest", 111, small());
-            draw_ota_centered(target, "PWR  Cancel", 172, small());
-        }
-        ota::Screen::Available { version, size } => {
-            draw_ota_centered(target, "Update available", 57, value_style());
-            draw_ota_centered(target, &format!("v{version}"), 82, weather_value_style());
-            draw_ota_centered(
-                target,
-                &format!("{:.1} MB", *size as f32 / (1024.0 * 1024.0)),
-                112,
-                small(),
-            );
-            draw_ota_centered(target, "Auto-cancel in 1 minute", 137, small());
-            draw_ota_centered(target, "BOOT Update   PWR Cancel", 172, small());
-        }
-        ota::Screen::Downloading { version, percent } => {
-            draw_ota_centered(target, &format!("Installing v{version}"), 57, value_style());
-            draw_ota_centered(target, &format!("{percent}%"), 89, weather_value_style());
-            draw_progress_bar(
-                target,
-                *percent,
-                Rectangle::new(Point::new(20, 124), Size::new(160, 18)),
-            );
-            draw_ota_centered(target, "PWR  Cancel", 172, small());
-        }
-        ota::Screen::Finalizing { version } => {
-            draw_ota_centered(target, &format!("Finalizing v{version}"), 69, value_style());
-            draw_ota_centered(target, "Verifying firmware", 101, small());
-            draw_ota_centered(target, "Do not power off", 128, value_style());
-        }
-        ota::Screen::Restarting { version } => {
-            draw_ota_centered(target, &format!("v{version} installed"), 69, value_style());
-            draw_ota_centered(target, "Restarting...", 105, weather_value_style());
-        }
-        ota::Screen::UpToDate => {
-            draw_ota_centered(target, "Already up to date", 75, value_style());
-            draw_ota_centered(
-                target,
-                &format!("v{}", ota::CURRENT_VERSION),
-                105,
-                weather_value_style(),
-            );
-            draw_ota_centered(target, "PWR  Back", 172, small());
-        }
-        ota::Screen::Failed { message } => {
-            draw_ota_centered(target, "Update failed", 55, value_style());
-            for (index, line) in compact_error_lines(message).iter().enumerate() {
-                draw_ota_centered(target, line, 84 + index as i32 * 13, small());
-            }
-            draw_ota_centered(target, "PWR  Back", 172, small());
-        }
-    }
-}
-
-fn draw_ota_centered(
-    target: &mut Framebuffer,
-    value: &str,
-    y: i32,
-    style: MonoTextStyle<'static, BinaryColor>,
-) {
-    Text::with_text_style(value, Point::new(100, y), style, centered_top())
-        .draw(target)
-        .ok();
-}
-
-fn draw_progress_bar(target: &mut Framebuffer, percent: u8, bounds: Rectangle) {
-    bounds.into_styled(thin()).draw(target).ok();
-    let width = bounds
-        .size
-        .width
-        .saturating_sub(4)
-        .saturating_mul(u32::from(percent.min(100)))
-        / 100;
-    if width > 0 {
-        Rectangle::new(
-            bounds.top_left + Point::new(2, 2),
-            Size::new(width, bounds.size.height.saturating_sub(4)),
-        )
-        .into_styled(filled())
-        .draw(target)
-        .ok();
-    }
-}
-
-fn compact_error_lines(message: &str) -> Vec<String> {
-    const LINE_LENGTH: usize = 29;
-    const LINE_COUNT: usize = 5;
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    for word in message.split_whitespace() {
-        if !current.is_empty() && current.len() + word.len() + 1 > LINE_LENGTH {
-            lines.push(std::mem::take(&mut current));
-            if lines.len() == LINE_COUNT {
-                break;
-            }
-        }
-        if !current.is_empty() {
-            current.push(' ');
-        }
-        current.extend(word.chars().take(LINE_LENGTH.saturating_sub(current.len())));
-    }
-    if lines.len() < LINE_COUNT && !current.is_empty() {
-        lines.push(current);
-    }
-    lines
 }
 
 struct StatusBar<'a> {
@@ -456,44 +322,6 @@ impl Widget for PageIndicator {
     }
 }
 
-const fn thin() -> PrimitiveStyle<BinaryColor> {
-    PrimitiveStyle::with_stroke(BinaryColor::On, 1)
-}
-
-const fn filled() -> PrimitiveStyle<BinaryColor> {
-    PrimitiveStyle::with_fill(BinaryColor::On)
-}
-
-const fn small() -> MonoTextStyle<'static, BinaryColor> {
-    MonoTextStyle::new(&FONT_6X10, BinaryColor::On)
-}
-
-const fn value_style() -> MonoTextStyle<'static, BinaryColor> {
-    MonoTextStyle::new(&FONT_9X15_BOLD, BinaryColor::On)
-}
-
-const fn weather_value_style() -> MonoTextStyle<'static, BinaryColor> {
-    MonoTextStyle::new(&FONT_10X20, BinaryColor::On)
-}
-
-fn centered_top() -> embedded_graphics::text::TextStyle {
-    TextStyleBuilder::new()
-        .alignment(Alignment::Center)
-        .baseline(Baseline::Top)
-        .build()
-}
-
-fn left_top() -> embedded_graphics::text::TextStyle {
-    TextStyleBuilder::new()
-        .alignment(Alignment::Left)
-        .baseline(Baseline::Top)
-        .build()
-}
-
-fn center_x(bounds: Rectangle) -> i32 {
-    bounds.top_left.x + bounds.size.width as i32 / 2
-}
-
 fn draw_double_size_time(
     target: &mut Framebuffer,
     value: &str,
@@ -745,7 +573,7 @@ impl Widget for TodayContent<'_> {
         Text::with_text_style(
             &temperature,
             Point::new(x + 142, y + 33),
-            weather_value_style(),
+            large_value_style(),
             centered_top(),
         )
         .draw(target)
@@ -819,7 +647,7 @@ impl Widget for MetricWidget {
         Text::with_text_style(
             self.value.as_deref().unwrap_or("--"),
             position + Point::new(0, 18),
-            weather_value_style(),
+            large_value_style(),
             centered_top(),
         )
         .draw(target)

@@ -1,10 +1,14 @@
-//! Renders the firmware's real clock-card artwork to a PNG contact sheet so it
-//! can be reviewed without flashing the device.
+//! Renders the firmware's real artwork to PNG contact sheets so it can be
+//! reviewed without flashing the device: `backdrops.png` for the clock card,
+//! and `update-screens.png` for every state of the firmware update screens,
+//! which are otherwise visible only during a live update.
 //!
-//! The framebuffer and backdrop modules are included straight from the firmware
-//! source; only the clock/date overlay is re-created here, mirroring
-//! `ClockWidget`. Pass a path to a packed 1-bit bitmap to preview a custom
-//! backdrop as the panel would draw it.
+//! The framebuffer, backdrop, style, and update-screen modules are included
+//! straight from the firmware source; only the clock/date overlay is re-created
+//! here, mirroring `ClockWidget`. The modules are declared with the names their
+//! firmware paths expect — `updates` reaches its siblings through `super`, which
+//! is `dashboard` there and the crate root here. Pass a path to a packed 1-bit
+//! bitmap to preview a custom backdrop as the panel would draw it.
 
 // The included firmware modules carry more API than one preview needs.
 #![allow(dead_code)]
@@ -14,6 +18,12 @@ mod ink_stacks;
 
 #[path = "../../../src/dashboard/backdrops.rs"]
 mod backdrops;
+
+#[path = "../../../src/dashboard/style.rs"]
+mod style;
+
+#[path = "../../../src/dashboard/updates.rs"]
+mod updates;
 
 mod png;
 
@@ -34,7 +44,87 @@ const CELL: Size = Size::new(200, 80);
 const SCALE: u32 = 3;
 const DATE: &str = "Wed 12 Aug";
 
+/// The whole panel, which the update screens draw into.
+const PANEL: Size = Size::new(200, 200);
+/// Twice the panel is already 400 pixels a cell; three times needs a scroll.
+const PANEL_SCALE: u32 = 2;
+
 fn main() {
+    backdrop_sheet();
+    update_screen_sheet();
+}
+
+/// Every state of the update screens, with the download sampled at the ends and
+/// the middle so the bar, the percentage, and the byte counts can be checked
+/// against each other.
+fn update_screen_sheet() {
+    // A plausible release: the size is the one in the manifest example.
+    const VERSION: &str = "0.1.1";
+    const TOTAL: usize = 1_415_648;
+
+    let mut screens = vec![
+        ("Checking".to_owned(), updates::Screen::Checking),
+        (
+            "Available".to_owned(),
+            updates::Screen::Available {
+                version: VERSION.to_owned(),
+                size: TOTAL,
+            },
+        ),
+    ];
+    // The worker reports every ten percent; the ends and one step between them
+    // are what the bar, the percentage, and the byte counts have to agree on.
+    screens.extend([0, 40, 100].map(|percent: usize| {
+        (
+            format!("Downloading {percent}%"),
+            updates::Screen::Downloading {
+                version: VERSION.to_owned(),
+                // Rounded up, so the screen's own integer division lands back on
+                // the percentage this cell is labelled with.
+                downloaded: (TOTAL * percent).div_ceil(100),
+                total: TOTAL,
+            },
+        )
+    }));
+    screens.extend([
+        (
+            "Finalizing".to_owned(),
+            updates::Screen::Finalizing {
+                version: VERSION.to_owned(),
+            },
+        ),
+        (
+            "Restarting".to_owned(),
+            updates::Screen::Restarting {
+                version: VERSION.to_owned(),
+            },
+        ),
+        ("Up to date".to_owned(), updates::Screen::UpToDate),
+        (
+            "Failed".to_owned(),
+            updates::Screen::Failed {
+                // A real message from the firmware, long enough to wrap.
+                message: "firmware SHA-256 does not match the manifest digest".to_owned(),
+            },
+        ),
+    ]);
+
+    let cells: Vec<(String, Framebuffer)> = screens
+        .into_iter()
+        .map(|(label, screen)| {
+            let mut frame = Framebuffer::new(PANEL);
+            frame.clear(BinaryColor::Off);
+            updates::render(&mut frame, &screen, VERSION);
+            (label, frame)
+        })
+        .collect();
+
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/update-screens.png");
+    write_sheet(path, &cells, 3, PANEL, PANEL_SCALE);
+    println!("wrote {path} ({} update screens)", cells.len());
+}
+
+fn backdrop_sheet() {
     // One row per weather condition, one column per hour slot.
     let mut cells: Vec<(String, Framebuffer)> = Vec::new();
     for sky in Sky::ALL {
@@ -106,7 +196,7 @@ fn main() {
 
     // Beside the tool, so the output does not depend on the working directory.
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/backdrops.png");
-    write_sheet(path, &cells, 4);
+    write_sheet(path, &cells, 4, CELL, SCALE);
     println!(
         "wrote {path} ({weather_cells} weather cells, {} custom)",
         cells.len() - weather_cells
@@ -193,13 +283,19 @@ impl DrawTarget for Scaled<'_> {
 }
 
 /// Lays the cells out in a grid with a caption strip under each one.
-fn write_sheet(path: &str, cells: &[(String, Framebuffer)], columns: usize) {
+fn write_sheet(
+    path: &str,
+    cells: &[(String, Framebuffer)],
+    columns: usize,
+    cell: Size,
+    scale: u32,
+) {
     const CAPTION: u32 = 14;
     const GAP: u32 = 6;
 
     let rows = cells.len().div_ceil(columns);
-    let cell_height = CELL.height + CAPTION;
-    let sheet_width = GAP + (CELL.width + GAP) * columns as u32;
+    let cell_height = cell.height + CAPTION;
+    let sheet_width = GAP + (cell.width + GAP) * columns as u32;
     let sheet_height = GAP + (cell_height + GAP) * rows as u32;
 
     let mut sheet = Framebuffer::new(Size::new(sheet_width, sheet_height));
@@ -209,18 +305,20 @@ fn write_sheet(path: &str, cells: &[(String, Framebuffer)], columns: usize) {
         let column = index % columns;
         let row = index / columns;
         let origin = Point::new(
-            (GAP + (CELL.width + GAP) * column as u32) as i32,
+            (GAP + (cell.width + GAP) * column as u32) as i32,
             (GAP + (cell_height + GAP) * row as u32) as i32,
         );
-        for y in 0..CELL.height as i32 {
-            for x in 0..CELL.width as i32 {
+        for y in 0..cell.height as i32 {
+            for x in 0..cell.width as i32 {
                 let color = read_pixel(frame, Point::new(x, y));
-                Pixel(origin + Point::new(x, y), color).draw(&mut sheet).ok();
+                Pixel(origin + Point::new(x, y), color)
+                    .draw(&mut sheet)
+                    .ok();
             }
         }
         Text::with_baseline(
             label,
-            origin + Point::new(0, CELL.height as i32 + 2),
+            origin + Point::new(0, cell.height as i32 + 2),
             MonoTextStyle::new(&FONT_6X10, BinaryColor::On),
             Baseline::Top,
         )
@@ -228,23 +326,23 @@ fn write_sheet(path: &str, cells: &[(String, Framebuffer)], columns: usize) {
         .ok();
     }
 
-    let mut pixels = Vec::with_capacity((sheet_width * sheet_height * SCALE * SCALE) as usize);
+    let mut pixels = Vec::with_capacity((sheet_width * sheet_height * scale * scale) as usize);
     for y in 0..sheet_height {
-        let mut row = Vec::with_capacity((sheet_width * SCALE) as usize);
+        let mut row = Vec::with_capacity((sheet_width * scale) as usize);
         for x in 0..sheet_width {
             let value = match read_pixel(&sheet, Point::new(x as i32, y as i32)) {
                 BinaryColor::On => 0,
                 BinaryColor::Off => 255,
             };
-            row.extend(std::iter::repeat(value).take(SCALE as usize));
+            row.extend(std::iter::repeat_n(value, scale as usize));
         }
-        for _ in 0..SCALE {
+        for _ in 0..scale {
             pixels.extend_from_slice(&row);
         }
     }
     std::fs::write(
         path,
-        png::encode(sheet_width * SCALE, sheet_height * SCALE, &pixels),
+        png::encode(sheet_width * scale, sheet_height * scale, &pixels),
     )
     .expect("writing preview PNG");
 }
