@@ -17,8 +17,6 @@ pub const DEFAULT_FREQUENCY_HZ: u16 = 880;
 pub const DEFAULT_DURATION_MS: u16 = 500;
 pub const DEFAULT_VOLUME_PERCENT: u8 = 45;
 
-pub const SUPPORTED_SAMPLE_RATES: [u32; 6] = [8_000, 16_000, 24_000, 32_000, 44_100, 48_000];
-
 #[derive(Clone, Copy)]
 enum ToneStep {
     Tone { frequency_hz: u16, duration_ms: u16 },
@@ -105,26 +103,13 @@ impl Waveform {
 /// playback. Dropping the temporary channel stops MCLK between sounds.
 pub struct Audio<'d> {
     amplifier_enable: PinDriver<'d, Output>,
-    pcm: Option<PcmPlayback>,
-    pcm_error: Option<String>,
-}
-
-struct PcmPlayback {
-    driver: I2sTxChannel,
-    expected_bytes: usize,
-    written_bytes: usize,
-    sample_rate_hz: u32,
 }
 
 impl<'d> Audio<'d> {
     pub fn new(amplifier_enable: Gpio46<'d>) -> Result<Self> {
         let mut amplifier_enable = PinDriver::output(amplifier_enable)?;
         amplifier_enable.set_low()?;
-        Ok(Self {
-            amplifier_enable,
-            pcm: None,
-            pcm_error: None,
-        })
+        Ok(Self { amplifier_enable })
     }
 
     pub fn play_tone(
@@ -174,9 +159,6 @@ impl<'d> Audio<'d> {
         i2c: &mut I2cBus<'_>,
         sequence: ToneSequence<'_>,
     ) -> Result<()> {
-        if self.pcm.is_some() {
-            bail!("PCM playback is already active");
-        }
         let mut driver = I2sTxChannel::new(SAMPLE_RATE_HZ).context("configuring I2S output")?;
 
         let result: Result<()> = (|| {
@@ -212,92 +194,9 @@ impl<'d> Audio<'d> {
         amplifier_result.context("disabling speaker amplifier")?;
         Ok(())
     }
-
-    pub fn begin_pcm(
-        &mut self,
-        i2c: &mut I2cBus<'_>,
-        expected_bytes: usize,
-        sample_rate_hz: u32,
-        volume_percent: u8,
-    ) -> Result<()> {
-        if self.pcm.is_some() {
-            bail!("PCM playback is already active");
-        }
-        if expected_bytes == 0 || expected_bytes % 2 != 0 {
-            bail!("PCM byte count must be a positive even number");
-        }
-        validate_sample_rate(sample_rate_hz)?;
-
-        self.pcm_error = None;
-        let mut driver = I2sTxChannel::new(sample_rate_hz).context("configuring PCM I2S output")?;
-        driver.enable().context("starting PCM I2S output")?;
-        initialize_codec(i2c, sample_rate_hz, volume_percent)?;
-        self.amplifier_enable
-            .set_high()
-            .context("enabling speaker amplifier")?;
-        self.pcm = Some(PcmPlayback {
-            driver,
-            expected_bytes,
-            written_bytes: 0,
-            sample_rate_hz,
-        });
-        Ok(())
-    }
-
-    pub fn write_pcm(&mut self, i2c: &mut I2cBus<'_>, data: &[u8]) -> Result<usize> {
-        if let Some(error) = &self.pcm_error {
-            bail!("PCM stream already failed: {error}");
-        }
-        let write_result = match self.pcm.as_mut() {
-            Some(playback) if playback.written_bytes + data.len() > playback.expected_bytes => {
-                Err(anyhow!("PCM data exceeds declared byte count"))
-            }
-            Some(playback) => playback.driver.write_all(data),
-            None => bail!("PCM playback is not active"),
-        };
-        if let Err(error) = write_result {
-            self.pcm.take();
-            let _ = self.amplifier_enable.set_low();
-            let _ = mute_codec(i2c);
-            let message = format!("{error:#}");
-            self.pcm_error = Some(message.clone());
-            bail!("{message}");
-        }
-        let playback = self.pcm.as_mut().context("PCM playback is not active")?;
-        playback.written_bytes += data.len();
-        Ok(playback.written_bytes)
-    }
-
-    pub fn finish_pcm(&mut self, i2c: &mut I2cBus<'_>) -> Result<usize> {
-        if let Some(error) = self.pcm_error.take() {
-            bail!("PCM stream failed: {error}");
-        }
-        let mut playback = self.pcm.take().context("PCM playback is not active")?;
-        let silence_result = write_silence(&mut playback.driver, playback.sample_rate_hz, 20);
-        let amplifier_result = self.amplifier_enable.set_low();
-        let _ = mute_codec(i2c);
-        silence_result?;
-        amplifier_result.context("disabling speaker amplifier")?;
-        if playback.written_bytes != playback.expected_bytes {
-            bail!(
-                "PCM length mismatch: expected {} bytes, played {}",
-                playback.expected_bytes,
-                playback.written_bytes
-            );
-        }
-        Ok(playback.written_bytes)
-    }
-
-    /// Whether the I2S channel is streaming. A remembered failure does not count:
-    /// nothing is playing then, and the dashboard must keep rendering even if the
-    /// host never sends `AUDIO PCM END`.
-    pub fn is_pcm_active(&self) -> bool {
-        self.pcm.is_some()
-    }
 }
 
 fn initialize_codec(i2c: &mut I2cBus<'_>, sample_rate_hz: u32, volume_percent: u8) -> Result<()> {
-    validate_sample_rate(sample_rate_hz)?;
     // Waveshare's ES8311 sequence for 16-bit mono with MCLK = sample rate * 256.
     write_register(i2c, 0x00, 0x1f)?;
     FreeRtos::delay_ms(20);
@@ -328,14 +227,6 @@ fn initialize_codec(i2c: &mut I2cBus<'_>, sample_rate_hz: u32, volume_percent: u
     write_register(i2c, 0x32, volume_register)?;
     write_register(i2c, 0x31, 0x00)?;
     Ok(())
-}
-
-fn validate_sample_rate(sample_rate_hz: u32) -> Result<()> {
-    if SUPPORTED_SAMPLE_RATES.contains(&sample_rate_hz) {
-        Ok(())
-    } else {
-        bail!("sample rate must be one of 8000, 16000, 24000, 32000, 44100, 48000 Hz")
-    }
 }
 
 fn mute_codec(i2c: &mut I2cBus<'_>) -> Result<()> {
@@ -434,7 +325,6 @@ struct I2sTxChannel {
 
 impl I2sTxChannel {
     fn new(sample_rate_hz: u32) -> Result<Self> {
-        validate_sample_rate(sample_rate_hz)?;
         let channel_config = sys::i2s_chan_config_t {
             id: sys::i2s_port_t_I2S_NUM_0,
             role: sys::i2s_role_t_I2S_ROLE_MASTER,

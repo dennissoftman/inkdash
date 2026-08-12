@@ -4,13 +4,10 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import getpass
 import glob
-import struct
 import sys
 import time
-import wave
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Sequence
@@ -18,8 +15,6 @@ from typing import Sequence
 
 DEFAULT_BAUD = 115_200
 DEFAULT_TIMEOUT_SECONDS = 35.0
-PCM_CHUNK_BYTES = 180
-PCM_WINDOW_CHUNKS = 8
 RTC_SYNC_TRANSPORT_LEAD_SECONDS = 0.030
 PORT_PATTERNS = (
     "/dev/cu.usbmodem*",
@@ -147,20 +142,6 @@ def build_parser() -> argparse.ArgumentParser:
     audio_tone.add_argument("--frequency", type=int, default=880, metavar="HZ")
     audio_tone.add_argument("--duration", type=int, default=500, metavar="MS")
     audio_tone.add_argument("--volume", type=int, default=45, metavar="PERCENT")
-    audio_pcm = audio_commands.add_parser(
-        "pcm",
-        help="stream a WAV file or raw signed 16-bit little-endian mono PCM",
-    )
-    audio_pcm.add_argument("path", type=Path)
-    audio_pcm.add_argument(
-        "--sample-rate",
-        type=int,
-        choices=(8_000, 16_000, 24_000, 32_000, 44_100, 48_000),
-        default=24_000,
-        metavar="HZ",
-        help="device rate; WAV input is converted, raw PCM is assumed to use this rate",
-    )
-    audio_pcm.add_argument("--volume", type=int, default=45, metavar="PERCENT")
     commands.add_parser("help-device", help="request the firmware's command help")
     commands.add_parser("console", help="open an interactive serial console")
     return parser
@@ -272,8 +253,6 @@ def command_for(args: argparse.Namespace) -> tuple[str | None, int]:
     if args.command == "refresh":
         return "REFRESH", 1
     if args.command == "audio":
-        if args.audio_command == "pcm":
-            return None, 0
         if not 100 <= args.frequency <= 5_000:
             raise CliError("frequency must be between 100 and 5000 Hz")
         if not 50 <= args.duration <= 5_000:
@@ -431,146 +410,6 @@ def synchronize_rtc(connection, timeout: float) -> int:
     return send_command(connection, "TIME GET", 1, timeout)
 
 
-def load_pcm(path: Path, target_rate: int) -> bytes:
-    if not path.is_file():
-        raise CliError(f"audio file does not exist: {path}")
-    if path.suffix.lower() != ".wav":
-        data = path.read_bytes()
-        if not data or len(data) % 2:
-            raise CliError("raw PCM must contain a positive even number of bytes")
-        return data
-
-    try:
-        with wave.open(str(path), "rb") as source:
-            if source.getcomptype() != "NONE":
-                raise CliError("compressed WAV files are not supported")
-            channels = source.getnchannels()
-            sample_width = source.getsampwidth()
-            input_rate = source.getframerate()
-            frame_count = source.getnframes()
-            raw = source.readframes(frame_count)
-    except (wave.Error, EOFError) as error:
-        raise CliError(f"cannot read WAV file: {error}") from error
-
-    if channels < 1:
-        raise CliError("WAV file has no channels")
-    if sample_width not in (1, 2, 3, 4):
-        raise CliError("WAV sample width must be 8, 16, 24, or 32 bits")
-
-    samples: list[int] = []
-    frame_size = channels * sample_width
-    for frame_offset in range(0, len(raw) - frame_size + 1, frame_size):
-        mixed = 0
-        for channel in range(channels):
-            offset = frame_offset + channel * sample_width
-            encoded = raw[offset : offset + sample_width]
-            if sample_width == 1:
-                sample = (encoded[0] - 128) << 8
-            else:
-                sample = int.from_bytes(encoded, "little", signed=True)
-                sample >>= 8 * (sample_width - 2)
-            mixed += sample
-        samples.append(max(-32_768, min(32_767, round(mixed / channels))))
-
-    if input_rate != target_rate and samples:
-        output_count = max(1, round(len(samples) * target_rate / input_rate))
-        converted: list[int] = []
-        for output_index in range(output_count):
-            position = output_index * input_rate / target_rate
-            lower = min(int(position), len(samples) - 1)
-            upper = min(lower + 1, len(samples) - 1)
-            fraction = position - lower
-            converted.append(
-                round(samples[lower] * (1.0 - fraction) + samples[upper] * fraction)
-            )
-        samples = converted
-
-    output = bytearray(len(samples) * 2)
-    for index, sample in enumerate(samples):
-        struct.pack_into("<h", output, index * 2, sample)
-    if not output:
-        raise CliError("WAV file contains no audio samples")
-    return bytes(output)
-
-
-def send_pcm(connection, pcm: bytes, sample_rate: int, volume: int, timeout: float) -> int:
-    duration = len(pcm) / (sample_rate * 2)
-    if duration > 120:
-        raise CliError("PCM stream must not exceed 120 seconds")
-
-    connection.reset_input_buffer()
-    header = f"AUDIO PCM BEGIN {len(pcm)} {sample_rate} {volume}\r\n"
-    connection.write(header.encode("ascii"))
-    connection.flush()
-
-    ready_deadline = time.monotonic() + timeout
-    while time.monotonic() < ready_deadline:
-        raw_line = connection.readline()
-        if not raw_line:
-            continue
-        line = raw_line.decode("utf-8", errors="replace").rstrip()
-        if line:
-            print(line)
-        if line.startswith("ERR AUDIO PCM"):
-            return 1
-        if line.startswith("OK AUDIO PCM READY"):
-            break
-    else:
-        raise CliError("timed out waiting for the device to prepare PCM playback")
-
-    # ESP-IDF's console is line-oriented and is not a transparent binary pipe.
-    # Base64 keeps control bytes out of the console. Small acknowledged windows
-    # keep throughput useful while preserving bounded, explicit backpressure.
-    print(f"Streaming {len(pcm)} bytes ({duration:.2f}s of audio)...")
-    window_size = PCM_CHUNK_BYTES * PCM_WINDOW_CHUNKS
-    for window_offset in range(0, len(pcm), window_size):
-        acknowledgements_expected = 0
-        window = pcm[window_offset : window_offset + window_size]
-        for chunk_offset in range(0, len(window), PCM_CHUNK_BYTES):
-            chunk = window[chunk_offset : chunk_offset + PCM_CHUNK_BYTES]
-            encoded = base64.b64encode(chunk).decode("ascii")
-            connection.write(f"AUDIO PCM DATA {encoded}\r\n".encode("ascii"))
-            acknowledgements_expected += 1
-        connection.flush()
-
-        acknowledgements = 0
-        window_deadline = time.monotonic() + timeout
-        while time.monotonic() < window_deadline:
-            raw_line = connection.readline()
-            if not raw_line:
-                continue
-            line = raw_line.decode("utf-8", errors="replace").rstrip()
-            if line.startswith("ERR AUDIO PCM"):
-                print(line)
-                return 1
-            if line.startswith("OK AUDIO PCM CHUNK bytes="):
-                acknowledgements += 1
-                if acknowledgements >= acknowledgements_expected:
-                    break
-            elif line:
-                print(line)
-        else:
-            raise CliError("timed out waiting for PCM chunk acknowledgements")
-
-    print(f"Transferred {len(pcm)} PCM bytes.")
-    connection.write(b"AUDIO PCM END\r\n")
-    connection.flush()
-
-    finish_deadline = time.monotonic() + duration + timeout
-    while time.monotonic() < finish_deadline:
-        raw_line = connection.readline()
-        if not raw_line:
-            continue
-        line = raw_line.decode("utf-8", errors="replace").rstrip()
-        if line:
-            print(line)
-        if line.startswith("ERR AUDIO PCM"):
-            return 1
-        if line.startswith("OK AUDIO PCM played_bytes="):
-            return 0
-    raise CliError("timed out waiting for PCM playback to finish")
-
-
 def interactive_console(connection) -> int:
     print("Interactive console. Type device commands; Ctrl-C or Ctrl-D exits.")
     try:
@@ -597,22 +436,11 @@ def interactive_console(connection) -> int:
 
 def run(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    pcm = None
-    if args.command == "audio" and args.audio_command == "pcm":
-        if not 1 <= args.volume <= 80:
-            raise CliError("volume must be between 1 and 80 percent")
-        pcm = load_pcm(args.path, args.sample_rate)
     device_command, expected_responses = command_for(args)
 
     if args.dry_run:
         if args.command == "time" and args.time_command == "sync":
             print("TIME SET <captured after device readiness, aligned to next host second>")
-        elif pcm is not None:
-            duration = len(pcm) / (args.sample_rate * 2)
-            print(
-                f"AUDIO PCM BEGIN {len(pcm)} {args.sample_rate} {args.volume} "
-                f"({duration:.2f}s, s16le mono)"
-            )
         elif device_command is None:
             print("CONSOLE")
         elif args.command == "wifi" and args.wifi_command == "set":
@@ -633,14 +461,6 @@ def run(argv: Sequence[str] | None = None) -> int:
         wait_for_device_ready(connection, args.timeout)
         if args.command == "time" and args.time_command == "sync":
             return synchronize_rtc(connection, args.timeout)
-        if pcm is not None:
-            return send_pcm(
-                connection,
-                pcm,
-                args.sample_rate,
-                args.volume,
-                args.timeout,
-            )
         if device_command is None:
             return interactive_console(connection)
         return send_command(

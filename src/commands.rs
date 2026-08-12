@@ -4,10 +4,7 @@ use std::thread;
 use anyhow::{anyhow, bail, Context, Result};
 use esp_idf_svc::sys::{self, EspError};
 
-use crate::audio::{
-    Waveform, DEFAULT_DURATION_MS, DEFAULT_FREQUENCY_HZ, DEFAULT_VOLUME_PERCENT,
-    SUPPORTED_SAMPLE_RATES,
-};
+use crate::audio::{Waveform, DEFAULT_DURATION_MS, DEFAULT_FREQUENCY_HZ, DEFAULT_VOLUME_PERCENT};
 use crate::config;
 use crate::datetime::DateTime;
 use crate::events::{AppEvent, EventSender};
@@ -41,13 +38,6 @@ pub enum Command {
         duration_ms: u16,
         volume_percent: u8,
     },
-    AudioPcmBegin {
-        byte_count: usize,
-        sample_rate_hz: u32,
-        volume_percent: u8,
-    },
-    AudioPcmData(Vec<u8>),
-    AudioPcmEnd,
 }
 
 pub type CommandMessage = Result<Command, String>;
@@ -153,9 +143,6 @@ pub fn help_text() -> &'static str {
      REFRESH\n\
      AUDIO BEEP [frequency_hz] [duration_ms] [volume_percent]\n\
      AUDIO TONE <sine|square|triangle> [frequency_hz] [duration_ms] [volume_percent]\n\
-     AUDIO PCM BEGIN <byte_count> <sample_rate_hz> <volume_percent>\n\
-     AUDIO PCM DATA <base64_chunk>\n\
-     AUDIO PCM END\n\
      HELP"
 }
 
@@ -173,38 +160,6 @@ fn parse(line: &str) -> Result<Command> {
         }
         [group, action, waveform, rest @ ..] if group == "AUDIO" && action == "TONE" => {
             parse_tone(Waveform::parse(waveform)?, rest)
-        }
-        [group, pcm, begin, byte_count, sample_rate, volume]
-            if group == "AUDIO" && pcm == "PCM" && begin == "BEGIN" =>
-        {
-            let byte_count: usize = parse_number(byte_count, "byte count")?;
-            let sample_rate_hz: u32 = parse_number(sample_rate, "sample rate")?;
-            let volume_percent: u8 = parse_number(volume, "volume")?;
-            if byte_count == 0 || byte_count % 2 != 0 {
-                bail!("PCM byte count must be a positive even number");
-            }
-            if !SUPPORTED_SAMPLE_RATES.contains(&sample_rate_hz) {
-                bail!("sample rate must be one of 8000, 16000, 24000, 32000, 44100, 48000 Hz");
-            }
-            if byte_count > sample_rate_hz as usize * 2 * 120 {
-                bail!("PCM stream must not exceed 120 seconds");
-            }
-            if !(1..=80).contains(&volume_percent) {
-                bail!("volume must be between 1 and 80 percent");
-            }
-            Ok(Command::AudioPcmBegin {
-                byte_count,
-                sample_rate_hz,
-                volume_percent,
-            })
-        }
-        // Base64 is case sensitive, so the chunk is taken from the original
-        // words rather than the upper-cased ones matched on here.
-        [group, pcm, data, _] if group == "AUDIO" && pcm == "PCM" && data == "DATA" => {
-            Ok(Command::AudioPcmData(decode_base64(&words[3])?))
-        }
-        [group, pcm, end] if group == "AUDIO" && pcm == "PCM" && end == "END" => {
-            Ok(Command::AudioPcmEnd)
         }
         [group, action] if group == "TIME" && action == "GET" => Ok(Command::TimeGet),
         [group, calibration, action]
@@ -264,52 +219,6 @@ fn parse(line: &str) -> Result<Command> {
             Ok(Command::WifiSet { ssid, password })
         }
         _ => bail!("unknown command; type HELP"),
-    }
-}
-
-fn decode_base64(encoded: &str) -> Result<Vec<u8>> {
-    let bytes = encoded.as_bytes();
-    if bytes.is_empty() || bytes.len() % 4 != 0 {
-        bail!("chunk must be non-empty padded Base64");
-    }
-
-    let mut decoded = Vec::with_capacity(bytes.len() / 4 * 3);
-    for (group_index, group) in bytes.chunks_exact(4).enumerate() {
-        let is_last = group_index + 1 == bytes.len() / 4;
-        let first = base64_value(group[0])?;
-        let second = base64_value(group[1])?;
-        decoded.push((first << 2) | (second >> 4));
-
-        if group[2] == b'=' {
-            if !is_last || group[3] != b'=' || second & 0x0f != 0 {
-                bail!("invalid Base64 padding in chunk");
-            }
-            continue;
-        }
-
-        let third = base64_value(group[2])?;
-        decoded.push((second << 4) | (third >> 2));
-        if group[3] == b'=' {
-            if !is_last || third & 0x03 != 0 {
-                bail!("invalid Base64 padding in chunk");
-            }
-            continue;
-        }
-
-        let fourth = base64_value(group[3])?;
-        decoded.push((third << 6) | fourth);
-    }
-    Ok(decoded)
-}
-
-fn base64_value(byte: u8) -> Result<u8> {
-    match byte {
-        b'A'..=b'Z' => Ok(byte - b'A'),
-        b'a'..=b'z' => Ok(byte - b'a' + 26),
-        b'0'..=b'9' => Ok(byte - b'0' + 52),
-        b'+' => Ok(62),
-        b'/' => Ok(63),
-        _ => bail!("invalid Base64 character in chunk"),
     }
 }
 

@@ -148,8 +148,6 @@ python3 scripts/device_cli.py audio beep
 python3 scripts/device_cli.py audio tone sine --frequency 440
 python3 scripts/device_cli.py audio tone square --frequency 440 --duration 250
 python3 scripts/device_cli.py audio tone triangle --frequency 660 --volume 35
-python3 scripts/device_cli.py audio pcm sound.wav --sample-rate 24000 --volume 45
-python3 scripts/device_cli.py audio pcm sound.pcm --sample-rate 16000 --volume 40
 python3 scripts/device_cli.py audio beep --frequency 440 --duration 1000 --volume 35
 python3 scripts/device_cli.py console
 ```
@@ -168,12 +166,10 @@ reading it back. Crystal drift can be corrected in the PCF85063 hardware. A
 positive calibration value means the RTC gains time; use a multi-day observation
 for useful ppm accuracy. Calibration uses the lower-power normal correction mode.
 
-WAV playback is converted by the Python CLI to signed 16-bit little-endian mono
-PCM before streaming. Raw `.pcm` input must already use that format at the
-selected rate. Supported output rates are 8, 16, 24, 32, 44.1, and 48 kHz;
-streams are limited to 120 seconds. The CLI transports PCM as acknowledged
-Base64 chunks, avoiding control-byte handling in ESP-IDF's line-oriented
-console and automatically returning to ordinary commands after playback.
+The speaker plays generated tones only: sine, square, and triangle waveforms at
+a chosen frequency, duration, and volume, which is all the battery alerts need.
+Streaming sampled audio over the console cost far more code and RAM than a
+notification chime is worth.
 
 ## Clock backdrops
 
@@ -253,7 +249,7 @@ magick photo.jpg -resize 192x72! -dither FloydSteinberg -monochrome backdrop.pbm
 | `src/clock.rs` | displayed time, carrying the last RTC reading through failed reads |
 | `src/shtc3.rs` | SHTC3 measurement, CRC, sleep/wake handling |
 | `src/battery.rs` | calibrated ADC sampling and approximate LiPo percentage |
-| `src/audio.rs` | ES8311 setup and temporary I2S tone playback |
+| `src/audio.rs` | ES8311 setup and generated I2S tone playback |
 | `src/wifi.rs` | station-mode connection and NVS credential storage |
 | `src/ntp.rs` | boot-time and daily SNTP synchronization events |
 | `src/location.rs` | reusable background location/timezone service and NVS cache |

@@ -245,7 +245,7 @@ fn main() -> Result<()> {
     weather_timer.after(config::IMMEDIATE_EVENT_DELAY)?;
 
     loop {
-        if render_requested && !audio.is_pcm_active() {
+        if render_requested {
             dashboard::render(&mut next_frame, &data, screen, &ota_screen);
             let changed = displayed_frame.changed_regions(&next_frame);
             let needs_full = force_full_refresh
@@ -572,11 +572,6 @@ fn main() -> Result<()> {
                     } else if power::source().is_external() {
                         log::debug!(
                             "Suppressing {} notification after external power attached",
-                            notification.name()
-                        );
-                    } else if audio.is_pcm_active() {
-                        log::warn!(
-                            "Skipping {} notification while PCM playback is active",
                             notification.name()
                         );
                     } else if let Err(error) = audio.play_notification(&mut i2c, notification) {
@@ -931,26 +926,6 @@ fn handle_command(command: Command, context: &mut CommandContext<'_, '_, '_>) ->
                 waveform.name()
             ),
             Err(error) => println!("ERR AUDIO {error:#}"),
-        },
-        Command::AudioPcmBegin {
-            byte_count,
-            sample_rate_hz,
-            volume_percent,
-        } => match audio.begin_pcm(i2c, byte_count, sample_rate_hz, volume_percent) {
-            Ok(()) => println!(
-                "OK AUDIO PCM READY bytes={byte_count} rate={sample_rate_hz}Hz volume={volume_percent}%"
-            ),
-            Err(error) => println!("ERR AUDIO PCM {error:#}"),
-        },
-        Command::AudioPcmData(data) => {
-            match audio.write_pcm(i2c, &data) {
-                Ok(byte_count) => println!("OK AUDIO PCM CHUNK bytes={byte_count}"),
-                Err(error) => println!("ERR AUDIO PCM {error:#}"),
-            }
-        }
-        Command::AudioPcmEnd => match audio.finish_pcm(i2c) {
-            Ok(byte_count) => println!("OK AUDIO PCM played_bytes={byte_count}"),
-            Err(error) => println!("ERR AUDIO PCM {error:#}"),
         },
     }
     refresh
