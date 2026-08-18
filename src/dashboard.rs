@@ -16,6 +16,9 @@ use crate::power::PowerSource;
 use crate::shtc3::ClimateReading;
 use crate::weather::Weather;
 
+/// `Clone` is for demo mode, which draws a copy with fields replaced rather than
+/// writing pretend readings into the live one.
+#[derive(Clone)]
 pub struct DashboardData {
     pub time: Option<DateTime>,
     pub climate: Option<ClimateReading>,

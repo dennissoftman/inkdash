@@ -129,6 +129,29 @@ def build_parser() -> argparse.ArgumentParser:
         "clear", help="restore the firmware's build-time endpoint"
     )
 
+    # Deliberately a passthrough rather than a mirror of every DEMO subcommand:
+    # this is a debugging surface that changes with the screens, and a second
+    # copy of its grammar here would only drift from the firmware's.
+    demo_parser = commands.add_parser(
+        "demo",
+        help="draw any screen on demand, for display debugging",
+        description=(
+            "Forwards its words to the firmware's DEMO command, which draws "
+            "screens that otherwise appear only during an update. Run "
+            "'help-device' for the current list. Nothing under DEMO touches the "
+            "network, the flash, or a real update, and a reset ends it."
+        ),
+    )
+    demo_parser.add_argument(
+        "words",
+        nargs=argparse.REMAINDER,
+        metavar="WORD",
+        help=(
+            "for example: update install 1501952 800 / refresh full / "
+            "data weather storm -3 / off"
+        ),
+    )
+
     commands.add_parser("status", help="show RTC and Wi-Fi status")
     commands.add_parser("refresh", help="request an immediate display refresh")
     audio_parser = commands.add_parser("audio", help="test the onboard speaker")
@@ -156,6 +179,10 @@ def validate_datetime(value: str) -> str:
     if not 2000 <= parsed.year <= 2099:
         raise CliError("RTC year must be between 2000 and 2099")
     return parsed.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def needs_quoting(value: str) -> bool:
+    return any(character.isspace() for character in value) or '"' in value or "\\" in value
 
 
 def quote_device_argument(value: str) -> str:
@@ -239,6 +266,23 @@ def command_for(args: argparse.Namespace) -> tuple[str | None, int]:
         if args.language_command == "get":
             return "LANGUAGE GET", 1
         return f"LANGUAGE SET {args.language.upper()}", 1
+
+    if args.command == "demo":
+        words = list(args.words)
+        # A negative temperature needs "--" to get past argparse; it is a shell
+        # convention, not something the device should be told about.
+        if words[:1] == ["--"]:
+            words = words[1:]
+        words = [word for word in words if word]
+        if not words:
+            raise CliError("demo needs at least one word; try 'demo status'")
+        # Case is left alone: the firmware matches keywords case-insensitively
+        # but keeps a version, an SSID, or a message exactly as it was typed.
+        quoted = [
+            quote_device_argument(word) if needs_quoting(word) else word
+            for word in words
+        ]
+        return "DEMO " + " ".join(quoted), 1
 
     if args.command == "ota":
         if args.endpoint_command == "get":

@@ -7,6 +7,7 @@ mod commands;
 mod config;
 mod dashboard;
 mod datetime;
+mod demo;
 mod epaper;
 mod events;
 mod i2c_bus;
@@ -198,6 +199,10 @@ fn main() -> Result<()> {
     let ota_restart_timer = timer_service.timer(move || {
         let _ = ota_restart_sender.send(AppEvent::OtaRestartDue);
     })?;
+    let demo_sender = event_sender.clone();
+    let demo_timer = timer_service.timer(move || {
+        let _ = demo_sender.send(AppEvent::DemoStepDue);
+    })?;
 
     let mut location = LocationService::start(nvs.clone(), event_sender.clone())?;
     let mut weather = WeatherService::start(event_sender.clone())?;
@@ -229,6 +234,7 @@ fn main() -> Result<()> {
     let mut ota_screen = updates::Screen::Hidden;
     let mut pending_update: Option<ota::UpdateInfo> = None;
     let mut ota_operation_active = false;
+    let mut demo = demo::Demo::new();
     let mut running_image_confirmation_checked = false;
     let mut system_time_synchronized = false;
     // The USB SOF monitor has had time to settle during peripheral setup.
@@ -251,11 +257,16 @@ fn main() -> Result<()> {
 
     loop {
         if render_requested {
-            dashboard::render(&mut next_frame, &data, screen, &ota_screen);
+            let overlay = demo.overlay(&data);
+            let drawn = overlay.as_ref().unwrap_or(&data);
+            dashboard::render(&mut next_frame, drawn, screen, &ota_screen);
             let changed = displayed_frame.changed_regions(&next_frame);
-            let needs_full = force_full_refresh
-                || !panel_initialized
-                || partial_refreshes >= config::FULL_REFRESH_AFTER_PARTIALS;
+            let needs_full = demo.needs_full_refresh(
+                force_full_refresh
+                    || !panel_initialized
+                    || partial_refreshes >= config::FULL_REFRESH_AFTER_PARTIALS,
+                panel_initialized,
+            );
             let refresh_result = match (needs_full, changed.as_slice()) {
                 (true, _) => epaper
                     .init_full()
@@ -281,36 +292,36 @@ fn main() -> Result<()> {
                     panel_initialized = true;
                     partial_refreshes = if needs_full { 0 } else { partial_refreshes + 1 };
                     force_full_refresh = false;
-                    let (slot, sky) = dashboard::scene(&data);
+                    let (slot, sky) = dashboard::scene(drawn);
                     log::info!(
                         "Dashboard refreshed: time={}, scene={}/{}, temp={}, humidity={}, wifi={}, rssi={}, weather={}, battery={}, heap={}/{} KiB free/min",
-                        data.time
+                        drawn.time
                             .map(|value| value.to_string())
                             .unwrap_or_else(|| "unset".into()),
                         slot.map_or("none", |slot| slot.label()),
                         sky.label(),
-                        data.climate
+                        drawn.climate
                             .map(|value| format!("{:.1} C", value.temperature_c))
                             .unwrap_or_else(|| "unavailable".into()),
-                        data.climate
+                        drawn.climate
                             .map(|value| format!("{:.0}%", value.humidity_percent))
                             .unwrap_or_else(|| "unavailable".into()),
-                        if data.wifi_connected { "up" } else { "down" },
-                        data.wifi_signal_dbm
+                        if drawn.wifi_connected { "up" } else { "down" },
+                        drawn.wifi_signal_dbm
                             .map(|value| format!("{value} dBm"))
                             .unwrap_or_else(|| "unavailable".into()),
-                        data.weather
+                        drawn.weather
                             .as_deref()
                             .map(|value| format!("{:.1} C {}", value.temperature_c, value.condition()))
                             .unwrap_or_else(|| "unavailable".into()),
-                        match data.battery.reading {
+                        match drawn.battery.reading {
                             Some(value) => format!(
                                 "{}% ({:.2} V, {})",
                                 value.percent,
                                 value.voltage_v,
-                                data.power_source.label()
+                                drawn.power_source.label()
                             ),
-                            None if data.power_source.is_external() => {
+                            None if drawn.power_source.is_external() => {
                                 "not detected (PWR)".into()
                             }
                             None => "not detected".into(),
@@ -357,6 +368,11 @@ fn main() -> Result<()> {
                 data.power_source = source;
                 render_requested = true;
             }
+            // A change of update screen is a scene change, and earns a full
+            // refresh: partial writes leave residue, and the screens either side
+            // of a download rewrite nearly the whole panel. The download
+            // advancing is not a scene change, so it stays partial.
+            let previous_screen = ota_screen.clone();
             match event {
                 AppEvent::Button(button) => match button {
                     ButtonEvent::CheckForUpdates
@@ -367,7 +383,6 @@ fn main() -> Result<()> {
                         pending_update = None;
                         ota_screen = updates::Screen::Checking;
                         render_requested = true;
-                        force_full_refresh = true;
                         weather_timer.cancel()?;
                         if !data.wifi_connected {
                             ota_screen = updates::Screen::Failed {
@@ -445,7 +460,6 @@ fn main() -> Result<()> {
                         pending_update = None;
                         ota_screen = updates::Screen::Hidden;
                         render_requested = true;
-                        force_full_refresh = true;
                         if data.wifi_connected {
                             weather_timer.after(config::IMMEDIATE_EVENT_DELAY)?;
                         }
@@ -456,6 +470,29 @@ fn main() -> Result<()> {
                         force_full_refresh = true;
                     }
                 },
+                // Handled here rather than in `handle_command`: demo mode needs
+                // the loop's own update screen and its timers.
+                AppEvent::Command(Ok(Command::Demo(action))) => {
+                    let outcome = demo.handle(action, &mut ota_screen, ota_operation_active);
+                    println!("{}", outcome.reply);
+                    if outcome.stop_stepping {
+                        demo_timer.cancel()?;
+                    }
+                    if let Some(delay) = outcome.step_after {
+                        demo_timer.after(delay)?;
+                    }
+                    render_requested |= outcome.render;
+                }
+                AppEvent::DemoStepDue => {
+                    let outcome = demo.step(&mut ota_screen);
+                    if !outcome.reply.is_empty() {
+                        println!("{}", outcome.reply);
+                    }
+                    if let Some(delay) = outcome.step_after {
+                        demo_timer.after(delay)?;
+                    }
+                    render_requested |= outcome.render;
+                }
                 AppEvent::Command(Ok(command)) => {
                     let clock_changed = matches!(&command, Command::TimeSet(_));
                     let explicit_refresh = matches!(&command, Command::Refresh);
@@ -715,7 +752,6 @@ fn main() -> Result<()> {
                         ota::WorkerEvent::Installed { version } => {
                             ota_operation_active = false;
                             ota_screen = updates::Screen::Restarting { version };
-                            force_full_refresh = true;
                             ota_restart_timer.after(config::OTA_RESTART_DELAY)?;
                         }
                         ota::WorkerEvent::InstallFailed(error) if ota_screen.is_visible() => {
@@ -735,7 +771,6 @@ fn main() -> Result<()> {
                             ota_operation_active = false;
                             if ota_screen.is_visible() {
                                 ota_screen = updates::Screen::Hidden;
-                                force_full_refresh = true;
                             }
                             if data.wifi_connected {
                                 weather_timer.after(config::IMMEDIATE_EVENT_DELAY)?;
@@ -784,7 +819,6 @@ fn main() -> Result<()> {
                         pending_update = None;
                         ota_screen = updates::Screen::Hidden;
                         render_requested = true;
-                        force_full_refresh = true;
                         if data.wifi_connected {
                             weather_timer.after(config::IMMEDIATE_EVENT_DELAY)?;
                         }
@@ -795,6 +829,16 @@ fn main() -> Result<()> {
                         ota::restart();
                     }
                 }
+            }
+            let advanced = matches!(
+                (&previous_screen, &ota_screen),
+                (
+                    updates::Screen::Downloading { .. },
+                    updates::Screen::Downloading { .. }
+                )
+            );
+            if ota_screen != previous_screen && !advanced {
+                force_full_refresh = true;
             }
         }
     }
@@ -907,6 +951,9 @@ fn handle_command(command: Command, context: &mut CommandContext<'_, '_, '_>) ->
         language,
     } = context;
     match command {
+        // The event loop intercepts these before they reach here, because they
+        // need its update screen and its timers.
+        Command::Demo(_) => {}
         Command::Ping => println!("OK PONG"),
         Command::Help => println!("{}", commands::help_text()),
         Command::TimeGet => match clock.read_rtc(i2c) {
