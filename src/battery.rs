@@ -42,7 +42,11 @@ where
         Self { channel }
     }
 
-    pub fn read(&mut self) -> Result<BatteryStatus> {
+    /// Average the divider and return the battery node in millivolts.
+    ///
+    /// The presence threshold is deliberately not applied here: charge
+    /// diagnostics want the raw node even when it reads as absent.
+    pub fn read_millivolts(&mut self) -> Result<f32> {
         const SAMPLE_COUNT: u32 = 16;
         // Samples are spaced with a busy-wait, not `FreeRtos::delay_ms`: the
         // 100 Hz tick rounds any sub-tick sleep up to a full 10 ms tick, which
@@ -56,7 +60,11 @@ where
             millivolts += self.channel.read()? as u32;
         }
 
-        let voltage_v = millivolts as f32 / SAMPLE_COUNT as f32 / 1000.0 * DIVIDER_MULTIPLIER;
+        Ok(millivolts as f32 / SAMPLE_COUNT as f32 * DIVIDER_MULTIPLIER)
+    }
+
+    pub fn read(&mut self) -> Result<BatteryStatus> {
+        let voltage_v = self.read_millivolts()? / 1000.0;
         if voltage_v < PRESENT_THRESHOLD_V {
             return Ok(BatteryStatus::unavailable());
         }

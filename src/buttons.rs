@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use esp_idf_hal::delay::FreeRtos;
 use esp_idf_hal::gpio::{Gpio0, Gpio18, Input, PinDriver, Pull};
 use esp_idf_hal::task::block_on;
+use esp_idf_svc::sys::{self, EspError};
 
 use crate::config;
 use crate::events::{AppEvent, EventSender};
@@ -36,6 +37,8 @@ pub fn start(
 ) -> Result<()> {
     let boot = PinDriver::input(boot_pin, Pull::Up)?;
     let power = PinDriver::input(power_pin, Pull::Up)?;
+    arm_light_sleep_wakeup(&boot)?;
+    arm_light_sleep_wakeup(&power)?;
     let (raw_sender, raw_events) = mpsc::channel();
     let power_sender = raw_sender.clone();
     thread::Builder::new()
@@ -56,18 +59,36 @@ pub fn start(
     Ok(())
 }
 
+/// Register a button as a light-sleep wake source.
+///
+/// `gpio_wakeup_enable` rejects edge triggers and rewrites the pin's interrupt
+/// type, which is why both waits below are level based: a press has to be able
+/// to wake a sleeping CPU, and an edge cannot. The driver disables the
+/// interrupt inside its own handler, so a held button cannot spin the ISR.
+fn arm_light_sleep_wakeup(pin: &PinDriver<'static, Input>) -> Result<()> {
+    // Active low through a pull-up, so the pressed state is the wake level.
+    EspError::convert(unsafe {
+        sys::gpio_wakeup_enable(pin.pin().into(), sys::gpio_int_type_t_GPIO_INTR_LOW_LEVEL)
+    })
+    .with_context(|| format!("enabling GPIO{} light-sleep wakeup", pin.pin()))?;
+    EspError::convert(unsafe { sys::esp_sleep_enable_gpio_wakeup() })
+        .context("enabling GPIO as a light-sleep wake source")?;
+    Ok(())
+}
+
 fn button_loop(
     mut pin: PinDriver<'static, Input>,
     button: ButtonId,
     sender: mpsc::Sender<RawButtonEvent>,
 ) {
     loop {
-        if let Err(error) = block_on(pin.wait_for_falling_edge()) {
+        if let Err(error) = block_on(pin.wait_for_low()) {
             log::error!("Button interrupt failed: {error}");
             return;
         }
-        // A one-shot settle delay is only armed after a GPIO edge. It consumes
-        // no CPU between presses and avoids turning switch bounce into events.
+        // A one-shot settle delay is only armed after the pin reads pressed. It
+        // consumes no CPU between presses and avoids turning switch bounce into
+        // events.
         FreeRtos::delay_ms(config::BUTTON_DEBOUNCE_MS);
         if pin.is_low() {
             if sender.send(RawButtonEvent::Pressed(button)).is_err() {
@@ -76,7 +97,7 @@ fn button_loop(
         } else {
             continue;
         }
-        if block_on(pin.wait_for_rising_edge()).is_err() {
+        if block_on(pin.wait_for_high()).is_err() {
             return;
         }
         FreeRtos::delay_ms(config::BUTTON_DEBOUNCE_MS);

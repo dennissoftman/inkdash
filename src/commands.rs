@@ -32,6 +32,8 @@ pub enum Command {
     OtaEndpointClear,
     Status,
     Refresh,
+    PowerLog,
+    PowerLogClear,
     AudioBeep {
         waveform: Waveform,
         frequency_hz: u16,
@@ -141,6 +143,8 @@ pub fn help_text() -> &'static str {
      OTA ENDPOINT CLEAR\n\
      STATUS\n\
      REFRESH\n\
+     POWER LOG\n\
+     POWER LOG CLEAR\n\
      AUDIO BEEP [frequency_hz] [duration_ms] [volume_percent]\n\
      AUDIO TONE <sine|square|triangle> [frequency_hz] [duration_ms] [volume_percent]\n\
      HELP"
@@ -155,6 +159,10 @@ fn parse(line: &str) -> Result<Command> {
         [command] if command == "HELP" => Ok(Command::Help),
         [command] if command == "STATUS" => Ok(Command::Status),
         [command] if command == "REFRESH" => Ok(Command::Refresh),
+        [group, action] if group == "POWER" && action == "LOG" => Ok(Command::PowerLog),
+        [group, action, reset] if group == "POWER" && action == "LOG" && reset == "CLEAR" => {
+            Ok(Command::PowerLogClear)
+        }
         [group, action, rest @ ..] if group == "AUDIO" && action == "BEEP" => {
             parse_tone(Waveform::Sine, rest)
         }
