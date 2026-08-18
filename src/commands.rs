@@ -6,9 +6,14 @@ use esp_idf_svc::sys::{self, EspError};
 
 use crate::audio::{Waveform, DEFAULT_DURATION_MS, DEFAULT_FREQUENCY_HZ, DEFAULT_VOLUME_PERCENT};
 use crate::config;
+use crate::dashboard::updates;
 use crate::datetime::DateTime;
+use crate::demo;
 use crate::events::{AppEvent, EventSender};
 use crate::language::Language;
+use crate::power::PowerSource;
+use crate::shtc3::ClimateReading;
+use crate::weather::WeatherKind;
 
 #[derive(Clone, Debug)]
 pub enum Command {
@@ -40,6 +45,7 @@ pub enum Command {
         duration_ms: u16,
         volume_percent: u8,
     },
+    Demo(demo::Action),
 }
 
 pub type CommandMessage = Result<Command, String>;
@@ -147,7 +153,27 @@ pub fn help_text() -> &'static str {
      POWER LOG CLEAR\n\
      AUDIO BEEP [frequency_hz] [duration_ms] [volume_percent]\n\
      AUDIO TONE <sine|square|triangle> [frequency_hz] [duration_ms] [volume_percent]\n\
-     HELP"
+     DEMO UPDATE CHECKING|UPTODATE\n\
+     DEMO UPDATE AVAILABLE <version> <bytes>\n\
+     DEMO UPDATE DOWNLOADING <version> <downloaded> <total>\n\
+     DEMO UPDATE FINALIZING|RESTARTING <version>\n\
+     DEMO UPDATE FAILED \"message\"\n\
+     DEMO UPDATE INSTALL [total_bytes] [step_ms]\n\
+     DEMO DATA BATTERY <0-100|none>\n\
+     DEMO DATA POWER <pwr|bat>\n\
+     DEMO DATA WIFI <off|0-3> [\"ssid\"]\n\
+     DEMO DATA WEATHER <sunny|cloudy|fog|rain|snow|storm|none> [temperature_c]\n\
+     DEMO DATA INDOOR <temperature_c> <humidity_percent> | none\n\
+     DEMO DATA BADGE <on|off>\n\
+     DEMO DATA CLEAR\n\
+     DEMO REFRESH <auto|full|partial>\n\
+     DEMO STATUS\n\
+     DEMO OFF\n\
+     HELP\n\
+     \n\
+     Demo mode draws screens on demand; TIME SET moves the clock artwork's\n\
+     time of day. Nothing in DEMO touches the network, the flash, or a real\n\
+     update, and a reset ends it."
 }
 
 fn parse(line: &str) -> Result<Command> {
@@ -215,6 +241,7 @@ fn parse(line: &str) -> Result<Command> {
         {
             Ok(Command::OtaEndpointSet(words[3].clone()))
         }
+        [group, ..] if group == "DEMO" => parse_demo(&normalized[1..], &words[1..]),
         [group, action, _, _] if group == "WIFI" && action == "SET" => {
             let ssid = words[2].clone();
             let password = words[3].clone();
@@ -252,6 +279,181 @@ fn parse_tone(waveform: Waveform, values: &[String]) -> Result<Command> {
         duration_ms,
         volume_percent,
     })
+}
+
+/// `normalized` is upper-cased for matching; `words` is the same slice with the
+/// case the operator typed, which is what a version, an SSID, or a message needs.
+fn parse_demo(normalized: &[String], words: &[String]) -> Result<Command> {
+    let action = match normalized {
+        [action] if action == "OFF" => demo::Action::Off,
+        [action] if action == "STATUS" => demo::Action::Status,
+        [action, mode] if action == "REFRESH" => demo::Action::Refresh(match mode.as_str() {
+            "AUTO" => demo::RefreshMode::Auto,
+            "FULL" => demo::RefreshMode::Full,
+            "PARTIAL" => demo::RefreshMode::Partial,
+            _ => bail!("refresh must be auto, full, or partial"),
+        }),
+        [group, ..] if group == "UPDATE" => parse_demo_update(&normalized[1..], &words[1..])?,
+        [group, ..] if group == "DATA" => parse_demo_data(&normalized[1..], &words[1..])?,
+        _ => bail!("unknown DEMO command; type HELP"),
+    };
+    Ok(Command::Demo(action))
+}
+
+fn parse_demo_update(normalized: &[String], words: &[String]) -> Result<demo::Action> {
+    let screen = match normalized {
+        [state] if state == "CHECKING" => updates::Screen::Checking,
+        [state] if state == "UPTODATE" => updates::Screen::UpToDate,
+        [state, _, size] if state == "AVAILABLE" => updates::Screen::Available {
+            version: demo_version(&words[1])?,
+            size: parse_number(size, "size in bytes")?,
+        },
+        [state, _, downloaded, total] if state == "DOWNLOADING" => {
+            let total: usize = parse_number(total, "total in bytes")?;
+            let downloaded: usize = parse_number(downloaded, "downloaded bytes")?;
+            if total == 0 {
+                bail!("total must be more than zero bytes");
+            }
+            if downloaded > total {
+                bail!("downloaded must not exceed the total");
+            }
+            updates::Screen::Downloading {
+                version: demo_version(&words[1])?,
+                downloaded,
+                total,
+            }
+        }
+        [state, _] if state == "FINALIZING" => updates::Screen::Finalizing {
+            version: demo_version(&words[1])?,
+        },
+        [state, _] if state == "RESTARTING" => updates::Screen::Restarting {
+            version: demo_version(&words[1])?,
+        },
+        [state, _] if state == "FAILED" => updates::Screen::Failed {
+            message: demo_message(&words[1])?,
+        },
+        [state, rest @ ..] if state == "INSTALL" => {
+            if rest.len() > 2 {
+                bail!("usage: DEMO UPDATE INSTALL [total_bytes] [step_ms]");
+            }
+            let total = rest
+                .first()
+                .map(|value| parse_number(value, "total in bytes"))
+                .transpose()?;
+            let step_ms = rest
+                .get(1)
+                .map(|value| parse_number(value, "step in milliseconds"))
+                .transpose()?;
+            return demo::replay(total, step_ms).map_err(|error| anyhow!("{error}"));
+        }
+        _ => bail!("unknown DEMO UPDATE screen; type HELP"),
+    };
+    Ok(demo::Action::Screen(screen))
+}
+
+fn parse_demo_data(normalized: &[String], words: &[String]) -> Result<demo::Action> {
+    let over = match normalized {
+        [field] if field == "CLEAR" => demo::DataOverride::Clear,
+        [field, value] if field == "BATTERY" => demo::DataOverride::Battery(match value.as_str() {
+            "NONE" => None,
+            value => {
+                let percent: u8 = parse_number(value, "battery percentage")?;
+                if percent > 100 {
+                    bail!("battery percentage must be 0 to 100");
+                }
+                Some(percent)
+            }
+        }),
+        [field, value] if field == "POWER" => demo::DataOverride::Power(match value.as_str() {
+            "PWR" | "EXTERNAL" => PowerSource::ExternalPower,
+            "BAT" | "BATTERY" => PowerSource::Battery,
+            _ => bail!("power must be pwr or bat"),
+        }),
+        [field, value, rest @ ..] if field == "WIFI" => {
+            if rest.len() > 1 {
+                bail!("usage: DEMO DATA WIFI <off|0-3> [\"ssid\"]");
+            }
+            let bars = match value.as_str() {
+                "OFF" => 0,
+                value => {
+                    let bars: u8 = parse_number(value, "signal bars")?;
+                    if bars > 3 {
+                        bail!("signal bars must be 0 to 3");
+                    }
+                    bars
+                }
+            };
+            // A named network is what the badge normally shows, so an unnamed
+            // request gets a placeholder rather than the "no Wi-Fi" label.
+            let ssid = match (bars, words.get(2)) {
+                (0, _) => None,
+                (_, None) => Some("demo-net".to_owned()),
+                (_, Some(ssid)) => {
+                    if ssid.is_empty() || ssid.len() > 32 {
+                        bail!("SSID must contain 1 to 32 bytes");
+                    }
+                    Some(ssid.clone())
+                }
+            };
+            demo::DataOverride::Wifi { bars, ssid }
+        }
+        [field, value, rest @ ..] if field == "WEATHER" => {
+            if rest.len() > 1 {
+                bail!("usage: DEMO DATA WEATHER <condition|none> [temperature_c]");
+            }
+            if value == "NONE" {
+                demo::DataOverride::Weather(None)
+            } else {
+                let kind = WeatherKind::parse(value)
+                    .context("condition must be sunny, cloudy, fog, rain, snow, or storm")?;
+                let temperature_c = rest
+                    .first()
+                    .map(|value| parse_decimal(value, "temperature"))
+                    .transpose()?
+                    .unwrap_or(18.0);
+                demo::DataOverride::Weather(Some((kind, temperature_c)))
+            }
+        }
+        [field, value] if field == "INDOOR" && value == "NONE" => demo::DataOverride::Indoor(None),
+        [field, temperature, humidity] if field == "INDOOR" => {
+            let humidity_percent = parse_decimal(humidity, "humidity")?;
+            if !(0.0..=100.0).contains(&humidity_percent) {
+                bail!("humidity must be 0 to 100");
+            }
+            demo::DataOverride::Indoor(Some(ClimateReading {
+                temperature_c: parse_decimal(temperature, "temperature")?,
+                humidity_percent,
+            }))
+        }
+        [field, value] if field == "BADGE" => demo::DataOverride::Badge(match value.as_str() {
+            "ON" => true,
+            "OFF" => false,
+            _ => bail!("badge must be on or off"),
+        }),
+        _ => bail!("unknown DEMO DATA field; type HELP"),
+    };
+    Ok(demo::Action::Data(over))
+}
+
+fn demo_version(value: &str) -> Result<String> {
+    if value.is_empty() || value.len() > 16 || !value.bytes().all(|byte| byte.is_ascii_graphic()) {
+        bail!("version must be 1 to 16 printable characters");
+    }
+    Ok(value.to_owned())
+}
+
+fn demo_message(value: &str) -> Result<String> {
+    // Five lines of twenty-nine characters is all the failure screen wraps to.
+    if value.is_empty() || value.len() > 145 {
+        bail!("message must be 1 to 145 characters");
+    }
+    Ok(value.to_owned())
+}
+
+fn parse_decimal(value: &str, label: &str) -> Result<f32> {
+    value
+        .parse()
+        .map_err(|error| anyhow!("{label} must be a number: {error}"))
 }
 
 fn parse_number<T>(value: &str, label: &str) -> Result<T>

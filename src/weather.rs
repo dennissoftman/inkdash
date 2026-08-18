@@ -69,7 +69,8 @@ impl Weather {
 }
 
 impl WeatherLocation {
-    fn new(city: &str, country_code: &str) -> Self {
+    /// Public so demo mode can name a place the geocoder never returned.
+    pub fn new(city: &str, country_code: &str) -> Self {
         Self {
             city: CompactName::new(city),
             country_code: CompactName::new(country_code),
@@ -119,6 +120,19 @@ impl ForecastPeriod {
 }
 
 impl WeatherKind {
+    /// Names the conditions rather than the codes, for the USB console.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.to_ascii_uppercase().as_str() {
+            "SUNNY" | "CLEAR" => Some(Self::Sunny),
+            "CLOUDY" => Some(Self::Cloudy),
+            "FOG" => Some(Self::Fog),
+            "RAIN" => Some(Self::Rain),
+            "SNOW" => Some(Self::Snow),
+            "STORM" => Some(Self::Storm),
+            _ => None,
+        }
+    }
+
     fn from_code(code: u16) -> Self {
         match code {
             0 => WeatherKind::Sunny,

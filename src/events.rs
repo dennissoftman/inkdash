@@ -15,6 +15,7 @@ pub enum AppEvent {
     Command(CommandMessage),
     ClockDue,
     PowerSampleDue,
+    DemoStepDue,
     WeatherDue,
     WeatherCompleted(WorkerUpdate),
     LocationCompleted(LocationWorkerUpdate),

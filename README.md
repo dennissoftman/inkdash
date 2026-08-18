@@ -95,8 +95,13 @@ REFRESH
 AUDIO BEEP 880 500 45
 AUDIO TONE SQUARE 440 500 35
 AUDIO TONE TRIANGLE 660 250 40
+DEMO UPDATE INSTALL
+DEMO OFF
 HELP
 ```
+
+`HELP` lists the rest of the `DEMO` family, which draws any screen on demand for
+display debugging; see [Demo mode](#demo-mode).
 
 Successful commands begin with `OK`; malformed commands and hardware/network
 failures begin with `ERR`. The RTC stores local wall-clock time and has no
@@ -171,6 +176,8 @@ python3 scripts/device_cli.py audio tone sine --frequency 440
 python3 scripts/device_cli.py audio tone square --frequency 440 --duration 250
 python3 scripts/device_cli.py audio tone triangle --frequency 660 --volume 35
 python3 scripts/device_cli.py audio beep --frequency 440 --duration 1000 --volume 35
+python3 scripts/device_cli.py demo update install
+python3 scripts/device_cli.py demo off
 python3 scripts/device_cli.py console
 ```
 
@@ -247,6 +254,36 @@ appears for a few seconds during an update, some of them only when a download
 fails. `update-screens.png` has all of them side by side, including the download
 at nought, forty, and a hundred percent.
 
+### Demo mode
+
+The preview renders frames, and a frame is not a refresh. What the panel does
+*between* two frames — partial window writes, and the residue they leave — only
+happens on the device, which is where the update screens were misdrawing while
+every frame of them was correct. Demo mode puts any screen on the real panel from
+the USB console, with no update, no network, and no writes to flash:
+
+```sh
+python3 scripts/device_cli.py demo update install       # replay a whole install
+python3 scripts/device_cli.py demo refresh full         # pin the refresh policy
+python3 scripts/device_cli.py demo -- data weather storm -3
+python3 scripts/device_cli.py demo off
+```
+
+`DEMO UPDATE INSTALL` walks the sequence a real update produces, in its order and
+at its granularity — the offer, one progress report per ten percent, verification,
+and the restart notice — so the refresh behaviour can be watched in twenty seconds
+instead of by cutting a release. `DEMO REFRESH FULL|PARTIAL|AUTO` pins the policy
+the renderer would otherwise choose, which is enough to test a fix for ghosting
+before writing one. `DEMO DATA` replaces battery, power, Wi-Fi, weather, indoor
+climate, and the update badge; `TIME SET` moves the clock artwork's time of day.
+`DEMO STATUS` reports what is currently pretended, and `DEMO OFF` restores
+everything. Nothing survives a reset, and a demo screen cannot start or mask a
+real update: the console refuses while one is running, and the existing rule that
+a check never begins with an update screen open covers the rest.
+
+The device's own `HELP` lists every form. The host CLI forwards its words rather
+than restating the grammar, so the two cannot drift.
+
 Custom artwork is not stored on the device yet. The drawing side is finished and
 storage-agnostic — `backdrops::draw_custom` takes a packed 192 × 72 bitmap, one
 bit per pixel, plus a flag pair for the clock colour and for a plate behind the
@@ -287,6 +324,7 @@ magick photo.jpg -resize 192x72! -dither FloydSteinberg -monochrome backdrop.pbm
 | `src/language.rs` | persistent language setting and extensible UI translation tables |
 | `src/notifications.rs` | semantic battery-alert scheduling and quiet-hour policy |
 | `src/ota.rs` | host-neutral manifest lookup, cancellable download, digest verification, and ESP-IDF OTA writes |
+| `src/demo.rs` | console-driven screen and sensor overrides for display debugging |
 | `src/dashboard.rs` | dashboard state, page selection, and render entry point |
 | `src/dashboard/backdrops.rs` | hour and weather clock artwork, and custom bitmap drawing |
 | `src/dashboard/style.rs` | the text sizes, strokes, and alignments every screen shares |
@@ -396,6 +434,20 @@ cargo build
 espflash flash --monitor target/xtensa-esp32s3-espidf/debug/inkdash
 ```
 
+The partition table has no `factory` slot, so `espflash` writes to `ota_0`. On a
+device that has installed an update over the air, `otadata` selects `ota_1`, and
+it keeps booting that: the USB flash appears to succeed and changes nothing. Clear
+the selection once, and the bootloader falls back to the slot that was just
+written.
+
+```sh
+espflash erase-parts --port /dev/cu.usbmodem101 \
+  --partition-table partitions.csv otadata
+```
+
+That erases only the eight kilobytes recording which slot to boot. Saved Wi-Fi
+credentials, the language, and the OTA endpoint live in `nvs` and are untouched.
+
 Releases are cut by pushing a tag, never by a commit:
 
 ```sh
@@ -484,6 +536,23 @@ The endpoint returns a deliberately small host-neutral JSON document:
   "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 }
 ```
+
+The download screen counts bytes as well as percent, because progress is
+reported once per ten percent and a stalled transfer otherwise looks exactly
+like a slow one. Its meter is ten discrete blocks rather than a bar that grows:
+a solid bar cannot be extended by partial refreshes on this panel, since each
+step drives only its new pixels and successive steps do not settle to the same
+darkness, so the bar comes out striped. Ten blocks make that variation part of
+the design, and no step touches a block already drawn. The percentage is padded
+to a fixed width for the same reason, so no digit ever moves onto pixels the
+previous number occupied.
+
+Refreshes follow one rule: a change of update screen is a scene change and
+redraws the whole panel, while a redraw within one screen — the meter advancing —
+stays partial. Partial writes leave residue on this hardware, and the screens
+either side of a download rewrite nearly all of it. All of this was worked out
+with demo mode against the real panel, not from the host preview, which renders
+frames and cannot model a refresh.
 
 Only semantic versions newer than the running package version are offered.
 Press **BOOT** within one minute to install, or **PWR** to cancel. PWR also

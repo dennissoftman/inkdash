@@ -71,7 +71,22 @@ impl Screen {
 /// one to the other changes the words rather than the layout.
 const TITLE_Y: i32 = 57;
 const HEADLINE_Y: i32 = 89;
-const PROGRESS_BAR: Rectangle = Rectangle::new(Point::new(20, 124), Size::new(160, 18));
+const PROGRESS_BAR: Rectangle = Rectangle::new(Point::new(22, 124), Size::new(156, 18));
+
+/// The meter is ten separate blocks, one per progress report, each sitting on
+/// its own byte column of the framebuffer with a blank column between it and
+/// its neighbours.
+///
+/// A solid bar cannot be grown by partial refreshes on this panel. Each step
+/// drives only its new pixels, with the partial waveform, and successive steps
+/// do not settle to the same darkness, so a bar that grows in place comes out
+/// striped no matter how its bytes are aligned. Discrete blocks make that
+/// variation part of the design rather than a defect, and no step ever touches
+/// a block that has already been drawn.
+const PROGRESS_BLOCKS: u32 = 10;
+const PROGRESS_BLOCK_WIDTH: u32 = 8;
+const PROGRESS_BLOCK_PITCH: i32 = 16;
+const PROGRESS_BLOCK_LEFT: i32 = 24;
 const DETAIL_Y: i32 = 148;
 const FOOTER_Y: i32 = 172;
 
@@ -130,10 +145,14 @@ pub fn render(target: &mut Framebuffer, screen: &Screen, current_version: &str) 
                 TITLE_Y,
                 value_style(),
             );
+            // Padded to a fixed width so no glyph ever moves: centring "9%"
+            // and then "10%" shifts every digit onto pixels the last number
+            // occupied, and a partial refresh leaves the old one showing
+            // through. The digits now grow leftwards into blank cells instead.
             centered(
                 target,
                 center,
-                &format!("{percent}%"),
+                &format!("{percent:>3}%"),
                 HEADLINE_Y,
                 large_value_style(),
             );
@@ -208,16 +227,14 @@ fn centered(
 
 fn draw_progress_bar(target: &mut Framebuffer, percent: u8, bounds: Rectangle) {
     bounds.into_styled(thin()).draw(target).ok();
-    let width = bounds
-        .size
-        .width
-        .saturating_sub(4)
-        .saturating_mul(u32::from(percent.min(100)))
-        / 100;
-    if width > 0 {
+    let filled_blocks = u32::from(percent.min(100)) * PROGRESS_BLOCKS / 100;
+    for index in 0..filled_blocks {
         Rectangle::new(
-            bounds.top_left + Point::new(2, 2),
-            Size::new(width, bounds.size.height.saturating_sub(4)),
+            Point::new(
+                PROGRESS_BLOCK_LEFT + index as i32 * PROGRESS_BLOCK_PITCH,
+                bounds.top_left.y + 2,
+            ),
+            Size::new(PROGRESS_BLOCK_WIDTH, bounds.size.height.saturating_sub(4)),
         )
         .into_styled(filled())
         .draw(target)
