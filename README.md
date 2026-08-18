@@ -20,8 +20,21 @@ The dashboard currently shows:
 
 The first render and every 30th visual update use a full e-paper refresh. Between
 them, ink-stacks reconciles a candidate framebuffer against the pixels already
-committed to the panel. Only changed, byte-aligned rectangles are written to
-panel RAM before a partial refresh, reducing SPI traffic, flashing, and ghosting.
+committed to the panel. Changed, byte-aligned rectangles are coalesced into one
+window and written to panel RAM before a partial refresh, reducing SPI traffic,
+flashing, and ghosting. The window is also copied into the controller's
+previous-image RAM afterwards, because the panel cannot sense its own glass and
+computes every later transition from that copy.
+
+A partial refresh is a duration rather than a value: it drives pigment for a
+fixed number of frames, and the pigment moves more slowly through colder, more
+viscous oil. The firmware loads its own waveform tables, which replaces the
+panel's temperature-compensated factory waveforms, so the frame counts are the
+same at every temperature. They were settled around 25-30 C. Below roughly
+20 C the partial waveform may stop under-driving pixels short of the rail, which
+looks like the display quietly reverting to an older frame rather than like a
+faint one. Scaling the drive from the SHTC3 reading is the intended remedy; see
+the waveform comments in `src/epaper.rs`.
 
 The dashboard has three pages. Press **BOOT** to move forward and **PWR** to move
 backward:
