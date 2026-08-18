@@ -255,6 +255,7 @@ fn main() -> Result<()> {
     queue_battery_notification(&mut battery_notifications, &data, &event_sender);
     schedule_clock(&clock_timer, data.time)?;
     let mut power_log = PowerLog::new();
+    let mut charge_detector = power::ChargeDetector::new();
     power_sample_timer.every(power_log::SAMPLE_INTERVAL)?;
     weather_timer.after(config::IMMEDIATE_EVENT_DELAY)?;
     ota_check_timer.after(config::OTA_CHECK_STARTUP_DELAY)?;
@@ -518,14 +519,19 @@ fn main() -> Result<()> {
                     render_requested = true;
                 }
                 AppEvent::PowerSampleDue => {
-                    // Diagnostics only: deliberately leaves `render_requested`
-                    // alone so the panel keeps its one-minute cadence.
+                    // Leaves `render_requested` alone so the panel keeps its
+                    // one-minute cadence. A source change still reaches the
+                    // screen promptly: the policy refresh at the top of this
+                    // loop sees it on the next event and asks for a render.
                     match battery.read_millivolts() {
-                        Ok(millivolts) => power_log.record(
-                            millivolts,
-                            power::source().is_external(),
-                            power::slept_recently(),
-                        ),
+                        Ok(millivolts) => {
+                            charge_detector.sample(millivolts);
+                            power_log.record(
+                                millivolts,
+                                power::source().is_external(),
+                                power::slept_recently(),
+                            );
+                        }
                         Err(error) => log::warn!("Battery sample failed: {error:#}"),
                     }
                 }

@@ -16,7 +16,8 @@ The dashboard currently shows:
 - Wi-Fi signal strength and the configured network name at the top left, with a
   download badge beside the battery once a newer release has been found;
 - a five-level battery icon at the top right, with a lightning bolt on its left
-  while attached to a USB host.
+  while external power is present, and an `E` in the same slot while running on
+  the reduced-power battery policy.
 
 The first render and every 30th visual update use a full e-paper refresh. Between
 them, ink-stacks reconciles a candidate framebuffer against the pixels already
@@ -328,9 +329,32 @@ compensation. Battery percentage is an estimate from voltage because this board
 does not expose a fuel-gauge IC.
 
 The icon quantizes the voltage estimate into approximately 10%, 25%, 50%, 75%,
-and nearly-full fill levels instead of displaying an exact number. Its lightning
-bolt reports an active native USB host connection; the schematic does not expose
-the charger's status output or USB VBUS to an ESP32 GPIO.
+and nearly-full fill levels instead of displaying an exact number.
+
+Its lightning bolt reports a USB host or a charge in progress, which takes two
+signals because the schematic exposes neither the charger's status output nor
+USB VBUS to a GPIO. ESP-IDF's USB SOF monitor is definitive when it fires, but
+it reports a USB *host*: a wall adapter supplies VBUS and never sends a SOF
+packet, so on a charger it reads as battery. The battery node covers that gap.
+
+The node is read as expiring evidence of a charge rather than as a latched
+power state, because the two directions are not equally visible. A charge
+announces itself: the node jumps 57-89 mV when a charger is applied and climbs
+3-5 mV per minute while current flows. Its removal can be almost silent, and was
+measured at 7 mV on a nearly full cell, where the charge current has already
+tapered and there is barely any left to remove. Latching on the loud edge and
+waiting for the quiet one leaves the bolt stuck on, so evidence instead expires
+after fifteen minutes unless renewed, and a clear downward step clears it at
+once. The two blind spots cancel: the case where an unplug is invisible is the
+same case where the charge had already finished and there was no evidence to
+keep. Steps are compared between medians of two short windows, so one sagging
+sample from an e-paper refresh or a Wi-Fi burst is discarded rather than
+averaged in.
+
+One consequence is deliberate: on a wall adapter the bolt goes out once the
+battery is full and the charge tapers, because at that point the board genuinely
+cannot distinguish the adapter from the battery. On a USB host the bolt stays,
+since the SOF monitor still answers directly.
 
 ## Board connections
 
