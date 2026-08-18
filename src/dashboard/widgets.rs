@@ -807,6 +807,30 @@ fn draw_page_indicator(
 
 /// An arrow dropping into a tray: a background check has found a newer release.
 /// Installing it stays deliberate, with BOOT+PWR.
+/// A boxed "E" reporting that the CPU is actually sleeping between events.
+///
+/// Sized and placed to occupy the lightning bolt's slot, which it is mutually
+/// exclusive with.
+fn draw_eco_badge(
+    target: &mut Framebuffer,
+    top_left: Point,
+    thin: PrimitiveStyle<BinaryColor>,
+    filled: PrimitiveStyle<BinaryColor>,
+) {
+    Rectangle::new(top_left, Size::new(11, 13))
+        .into_styled(thin)
+        .draw(target)
+        .ok();
+    Text::with_baseline(
+        "E",
+        top_left + Point::new(3, 2),
+        MonoTextStyle::new(&FONT_6X10, filled.stroke_color.unwrap_or(BinaryColor::On)),
+        Baseline::Top,
+    )
+    .draw(target)
+    .ok();
+}
+
 fn draw_update_badge(
     target: &mut Framebuffer,
     top_left: Point,
@@ -1167,8 +1191,17 @@ fn draw_battery_status(
     thin: PrimitiveStyle<BinaryColor>,
     filled: PrimitiveStyle<BinaryColor>,
 ) {
+    // The slot left of the battery carries one meaning at a time. External
+    // power outranks eco: while charging, how the board idles is the less
+    // interesting half, and the two never need to be read together.
+    // Derived here rather than carried in the dashboard state: as a stored
+    // field it went stale the instant the source changed, because the power
+    // handler updates the source and renders without a full sensor refresh --
+    // so unplugging dropped the bolt and drew no badge at all.
     if power_source.is_external() {
         draw_lightning(target, bounds, filled);
+    } else {
+        draw_eco_badge(target, bounds.top_left + Point::new(1, 5), thin, filled);
     }
     draw_battery(target, bounds, status.reading, thin, filled);
 }

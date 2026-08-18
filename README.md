@@ -16,12 +16,26 @@ The dashboard currently shows:
 - Wi-Fi signal strength and the configured network name at the top left, with a
   download badge beside the battery once a newer release has been found;
 - a five-level battery icon at the top right, with a lightning bolt on its left
-  while attached to a USB host.
+  while external power is present, and an `E` in the same slot while running on
+  the reduced-power battery policy.
 
 The first render and every 30th visual update use a full e-paper refresh. Between
 them, ink-stacks reconciles a candidate framebuffer against the pixels already
-committed to the panel. Only changed, byte-aligned rectangles are written to
-panel RAM before a partial refresh, reducing SPI traffic, flashing, and ghosting.
+committed to the panel. Changed, byte-aligned rectangles are coalesced into one
+window and written to panel RAM before a partial refresh, reducing SPI traffic,
+flashing, and ghosting. The window is also copied into the controller's
+previous-image RAM afterwards, because the panel cannot sense its own glass and
+computes every later transition from that copy.
+
+A partial refresh is a duration rather than a value: it drives pigment for a
+fixed number of frames, and the pigment moves more slowly through colder, more
+viscous oil. The firmware loads its own waveform tables, which replaces the
+panel's temperature-compensated factory waveforms, so the frame counts are the
+same at every temperature. They were settled around 25-30 C. Below roughly
+20 C the partial waveform may stop under-driving pixels short of the rail, which
+looks like the display quietly reverting to an older frame rather than like a
+faint one. Scaling the drive from the SHTC3 reading is the intended remedy; see
+the waveform comments in `src/epaper.rs`.
 
 The dashboard has three pages. Press **BOOT** to move forward and **PWR** to move
 backward:
@@ -119,10 +133,17 @@ To set the RTC from the development computer, open the monitor and paste a
 
 ```sh
 source "$HOME/.local/bin/export-esp.sh"
-espflash monitor --port /dev/cu.usbmodem101
+espflash monitor
 ```
 
 Exit the monitor with `Ctrl-C`.
+
+`espflash` and the Python helper both autodetect a single attached board, so no
+device path is written down anywhere. The board enumerates as
+`/dev/cu.usbmodem*` on macOS and `/dev/ttyACM*` on Linux, and the name is not
+stable: it follows the USB port it is plugged into, so a path that worked
+yesterday can be wrong today. Add `--port <device>` to any command below only
+when more than one board is attached and autodetection has to be told which.
 
 ### Friendly host CLI
 
@@ -160,8 +181,7 @@ python3 scripts/device_cli.py demo off
 python3 scripts/device_cli.py console
 ```
 
-Pass `--port /dev/cu.usbmodem101` before the subcommand to override
-autodetection. Use `--dry-run` to inspect the command without opening the port;
+Pass `--port <device>` before the subcommand to override autodetection. Use `--dry-run` to inspect the command without opening the port;
 Wi-Fi passwords are always redacted in dry-run output.
 
 The helper performs a `PING`/`OK PONG` readiness handshake before every action.
@@ -353,9 +373,32 @@ compensation. Battery percentage is an estimate from voltage because this board
 does not expose a fuel-gauge IC.
 
 The icon quantizes the voltage estimate into approximately 10%, 25%, 50%, 75%,
-and nearly-full fill levels instead of displaying an exact number. Its lightning
-bolt reports an active native USB host connection; the schematic does not expose
-the charger's status output or USB VBUS to an ESP32 GPIO.
+and nearly-full fill levels instead of displaying an exact number.
+
+Its lightning bolt reports a USB host or a charge in progress, which takes two
+signals because the schematic exposes neither the charger's status output nor
+USB VBUS to a GPIO. ESP-IDF's USB SOF monitor is definitive when it fires, but
+it reports a USB *host*: a wall adapter supplies VBUS and never sends a SOF
+packet, so on a charger it reads as battery. The battery node covers that gap.
+
+The node is read as expiring evidence of a charge rather than as a latched
+power state, because the two directions are not equally visible. A charge
+announces itself: the node jumps 57-89 mV when a charger is applied and climbs
+3-5 mV per minute while current flows. Its removal can be almost silent, and was
+measured at 7 mV on a nearly full cell, where the charge current has already
+tapered and there is barely any left to remove. Latching on the loud edge and
+waiting for the quiet one leaves the bolt stuck on, so evidence instead expires
+after fifteen minutes unless renewed, and a clear downward step clears it at
+once. The two blind spots cancel: the case where an unplug is invisible is the
+same case where the charge had already finished and there was no evidence to
+keep. Steps are compared between medians of two short windows, so one sagging
+sample from an e-paper refresh or a Wi-Fi burst is discarded rather than
+averaged in.
+
+One consequence is deliberate: on a wall adapter the bolt goes out once the
+battery is full and the charge tapers, because at that point the board genuinely
+cannot distinguish the adapter from the battery. On a USB host the bolt stays,
+since the SOF monitor still answers directly.
 
 ## Board connections
 
@@ -388,8 +431,7 @@ source "$HOME/.local/bin/export-esp.sh"
 cargo fmt --all --check
 cargo clippy -- -D warnings
 cargo build
-espflash flash --monitor --port /dev/cu.usbmodem101 \
-  target/xtensa-esp32s3-espidf/debug/inkdash
+espflash flash --monitor target/xtensa-esp32s3-espidf/debug/inkdash
 ```
 
 The partition table has no `factory` slot, so `espflash` writes to `ota_0`. On a
@@ -588,6 +630,11 @@ After confirming the port, board identity, filename, and checksum, restore it
 at flash offset `0x0`:
 
 ```sh
-esptool --chip esp32s3 --port /dev/cu.usbmodem101 \
+PORT=$(ls /dev/cu.usbmodem* /dev/ttyACM* 2>/dev/null)  # expect exactly one
+esptool --chip esp32s3 --port "$PORT" \
   write-flash 0x0 backups/esp32-s3-factory-14c19fd46a3c-2026-08-11.bin
 ```
+
+This one overwrites the entire flash, so the port is resolved into a variable
+and checked rather than autodetected: if that command prints more than one
+device, set `PORT` by hand instead of guessing.

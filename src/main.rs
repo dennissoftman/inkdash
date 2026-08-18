@@ -18,6 +18,7 @@ mod notifications;
 mod ntp;
 mod ota;
 mod power;
+mod power_log;
 mod rtc;
 mod shtc3;
 mod weather;
@@ -58,6 +59,7 @@ use ink_stacks::Framebuffer;
 use language::{Language, LanguageStore};
 use location::LocationService;
 use notifications::BatteryNotificationSchedule;
+use power_log::PowerLog;
 use shtc3::Shtc3;
 use weather::WeatherService;
 use wifi::{WifiCredentials, WifiManager};
@@ -71,6 +73,7 @@ struct CommandContext<'a, 'i, 's> {
     language_store: &'a LanguageStore,
     ota_endpoint: &'a ota::EndpointStore,
     language: &'a mut Language,
+    power_log: &'a mut PowerLog,
 }
 
 fn main() -> Result<()> {
@@ -78,6 +81,7 @@ fn main() -> Result<()> {
     EspLogger::initialize_default();
     log::info!("Starting modular Rust e-paper dashboard");
     let mut power_policy = power::PowerPolicy::initialize()?;
+    power::track_light_sleep()?;
 
     let peripherals = Peripherals::take()?;
     let pins = peripherals.pins;
@@ -199,6 +203,10 @@ fn main() -> Result<()> {
     let ota_restart_timer = timer_service.timer(move || {
         let _ = ota_restart_sender.send(AppEvent::OtaRestartDue);
     })?;
+    let power_sample_sender = event_sender.clone();
+    let power_sample_timer = timer_service.timer(move || {
+        let _ = power_sample_sender.send(AppEvent::PowerSampleDue);
+    })?;
     let demo_sender = event_sender.clone();
     let demo_timer = timer_service.timer(move || {
         let _ = demo_sender.send(AppEvent::DemoStepDue);
@@ -252,6 +260,9 @@ fn main() -> Result<()> {
     let mut battery_notifications = BatteryNotificationSchedule::new();
     queue_battery_notification(&mut battery_notifications, &data, &event_sender);
     schedule_clock(&clock_timer, data.time)?;
+    let mut power_log = PowerLog::new();
+    let mut charge_detector = power::ChargeDetector::new();
+    power_sample_timer.every(power_log::SAMPLE_INTERVAL)?;
     weather_timer.after(config::IMMEDIATE_EVENT_DELAY)?;
     ota_check_timer.after(config::OTA_CHECK_STARTUP_DELAY)?;
 
@@ -294,7 +305,7 @@ fn main() -> Result<()> {
                     force_full_refresh = false;
                     let (slot, sky) = dashboard::scene(drawn);
                     log::info!(
-                        "Dashboard refreshed: time={}, scene={}/{}, temp={}, humidity={}, wifi={}, rssi={}, weather={}, battery={}, heap={}/{} KiB free/min",
+                        "Dashboard refreshed: time={}, scene={}/{}, temp={}, humidity={}, wifi={}, rssi={}, weather={}, battery={}, eco={}, heap={}/{} KiB free/min",
                         drawn.time
                             .map(|value| value.to_string())
                             .unwrap_or_else(|| "unset".into()),
@@ -326,6 +337,7 @@ fn main() -> Result<()> {
                             }
                             None => "not detected".into(),
                         },
+                        if drawn.power_source.is_external() { "off" } else { "on" },
                         unsafe { esp_idf_svc::sys::esp_get_free_heap_size() } / 1024,
                         unsafe { esp_idf_svc::sys::esp_get_minimum_free_heap_size() } / 1024,
                     );
@@ -507,6 +519,7 @@ fn main() -> Result<()> {
                             language_store: &language_store,
                             ota_endpoint: &ota_endpoint_store,
                             language: &mut data.language,
+                            power_log: &mut power_log,
                         },
                     ) {
                         refresh_dashboard_data(
@@ -541,6 +554,23 @@ fn main() -> Result<()> {
                     queue_battery_notification(&mut battery_notifications, &data, &event_sender);
                     schedule_clock(&clock_timer, data.time)?;
                     render_requested = true;
+                }
+                AppEvent::PowerSampleDue => {
+                    // Leaves `render_requested` alone so the panel keeps its
+                    // one-minute cadence. A source change still reaches the
+                    // screen promptly: the policy refresh at the top of this
+                    // loop sees it on the next event and asks for a render.
+                    match battery.read_millivolts() {
+                        Ok(millivolts) => {
+                            charge_detector.sample(millivolts);
+                            power_log.record(
+                                millivolts,
+                                power::source().is_external(),
+                                power::slept_recently(),
+                            );
+                        }
+                        Err(error) => log::warn!("Battery sample failed: {error:#}"),
+                    }
                 }
                 AppEvent::WeatherDue => {
                     if !wifi.is_connected() {
@@ -949,6 +979,7 @@ fn handle_command(command: Command, context: &mut CommandContext<'_, '_, '_>) ->
         language_store,
         ota_endpoint,
         language,
+        power_log,
     } = context;
     match command {
         // The event loop intercepts these before they reach here, because they
@@ -1019,6 +1050,11 @@ fn handle_command(command: Command, context: &mut CommandContext<'_, '_, '_>) ->
             print_wifi_status(wifi);
         }
         Command::Refresh => println!("OK REFRESH queued"),
+        Command::PowerLog => power_log.print(),
+        Command::PowerLogClear => {
+            power_log.clear();
+            println!("OK POWER LOG cleared");
+        }
         Command::AudioBeep {
             waveform,
             frequency_hz,
