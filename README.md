@@ -128,10 +128,17 @@ To set the RTC from the development computer, open the monitor and paste a
 
 ```sh
 source "$HOME/.local/bin/export-esp.sh"
-espflash monitor --port /dev/cu.usbmodem101
+espflash monitor
 ```
 
 Exit the monitor with `Ctrl-C`.
+
+`espflash` and the Python helper both autodetect a single attached board, so no
+device path is written down anywhere. The board enumerates as
+`/dev/cu.usbmodem*` on macOS and `/dev/ttyACM*` on Linux, and the name is not
+stable: it follows the USB port it is plugged into, so a path that worked
+yesterday can be wrong today. Add `--port <device>` to any command below only
+when more than one board is attached and autodetection has to be told which.
 
 ### Friendly host CLI
 
@@ -167,8 +174,7 @@ python3 scripts/device_cli.py audio beep --frequency 440 --duration 1000 --volum
 python3 scripts/device_cli.py console
 ```
 
-Pass `--port /dev/cu.usbmodem101` before the subcommand to override
-autodetection. Use `--dry-run` to inspect the command without opening the port;
+Pass `--port <device>` before the subcommand to override autodetection. Use `--dry-run` to inspect the command without opening the port;
 Wi-Fi passwords are always redacted in dry-run output.
 
 The helper performs a `PING`/`OK PONG` readiness handshake before every action.
@@ -387,8 +393,7 @@ source "$HOME/.local/bin/export-esp.sh"
 cargo fmt --all --check
 cargo clippy -- -D warnings
 cargo build
-espflash flash --monitor --port /dev/cu.usbmodem101 \
-  target/xtensa-esp32s3-espidf/debug/inkdash
+espflash flash --monitor target/xtensa-esp32s3-espidf/debug/inkdash
 ```
 
 Releases are cut by pushing a tag, never by a commit:
@@ -556,6 +561,11 @@ After confirming the port, board identity, filename, and checksum, restore it
 at flash offset `0x0`:
 
 ```sh
-esptool --chip esp32s3 --port /dev/cu.usbmodem101 \
+PORT=$(ls /dev/cu.usbmodem* /dev/ttyACM* 2>/dev/null)  # expect exactly one
+esptool --chip esp32s3 --port "$PORT" \
   write-flash 0x0 backups/esp32-s3-factory-14c19fd46a3c-2026-08-11.bin
 ```
+
+This one overwrites the entire flash, so the port is resolved into a variable
+and checked rather than autodetected: if that command prints more than one
+device, set `PORT` by hand instead of guessing.
